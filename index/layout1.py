@@ -5,10 +5,12 @@ from dataclasses import dataclass
 import math
 from bisect import bisect_right
 
+
 @dataclass
 class Point:
     """表示d维空间中的一个点"""
     coordinates: List[float]
+
 
 @dataclass
 class Query:
@@ -16,8 +18,10 @@ class Query:
     min_bounds: List[float]  # 每个维度的最小值
     max_bounds: List[float]  # 每个维度的最大值
 
+
 class PLMSegment:
     """PLM模型中的线性段"""
+
     def __init__(self, start_value: float, start_index: int, end_value: float, end_index: int):
         self.start_value = start_value
         self.start_index = start_index
@@ -32,16 +36,17 @@ class PLMSegment:
 
     def predict(self, value: float) -> float:
         """预测给定值的索引位置"""
-        return self.slope * value + self.intercept#P(v)=D(vmin)+D(vmax)−D(vmin)/vmax−vminX(v−vmin)
+        return self.slope * value + self.intercept
 
 
 class PLMModel:
     """分段线性模型(PLM)实现"""
+
     def __init__(self, error_threshold: float = 0.1):
         self.error_threshold = error_threshold
         self.cell_segments: Dict[Tuple[int, ...], List[PLMSegment]] = {}  # 每个单元格的段
         self.cell_boundaries: Dict[Tuple[int, ...], List[float]] = {}  # 每个单元格的边界值
-        
+
     def fit(self, values: List[float], indices: List[int], cell_id: Tuple[int, ...]):
         """训练PLM模型
         使用贪心算法将数据分成多个段，每个段的平均误差不超过阈值
@@ -52,23 +57,23 @@ class PLMModel:
         """
         if not values:
             return
-            
+
         # 对值进行排序
         sorted_pairs = sorted(zip(values, indices))
         values, indices = zip(*sorted_pairs)
         values = list(values)
         indices = list(indices)
-        
+
         current_segment_start = 0
         current_segment_values = []
         current_segment_indices = []
         segments = []
         boundaries = []
-        
+
         for i in range(len(values)):
             current_segment_values.append(values[i])
             current_segment_indices.append(indices[i])
-            
+
             # 计算当前段的平均误差
             if len(current_segment_values) > 1:
                 segment = PLMSegment(
@@ -77,26 +82,26 @@ class PLMModel:
                     current_segment_values[-1],
                     current_segment_indices[-1]
                 )
-                
+
                 # 计算平均误差
                 total_error = 0
                 for v, d in zip(current_segment_values, current_segment_indices):
                     p = segment.predict(v)
                     total_error += d - p  # 使用下界性质
-                
+
                 avg_error = total_error / len(current_segment_values)
-                
+
                 # 如果平均误差超过阈值，开始新的段
                 if avg_error > self.error_threshold:
                     # 保存当前段
                     segments.append(segment)
                     boundaries.append(values[current_segment_start])
-                    
+
                     # 开始新的段
                     current_segment_start = i
                     current_segment_values = [values[i]]
                     current_segment_indices = [indices[i]]
-        
+
         # 添加最后一个段
         if current_segment_values:
             segments.append(PLMSegment(
@@ -106,32 +111,34 @@ class PLMModel:
                 current_segment_indices[-1]
             ))
             boundaries.append(values[current_segment_start])
-        
+
         # 保存该单元格的段和边界
         self.cell_segments[cell_id] = segments
         self.cell_boundaries[cell_id] = boundaries
-    
+
     def predict(self, value: float, cell_id: Tuple[int, ...]) -> float:
         """使用PLM模型预测索引位置"""
         if cell_id not in self.cell_segments:
             return 0.0
-            
+
         segments = self.cell_segments[cell_id]
         boundaries = self.cell_boundaries[cell_id]
-        
+
         # 使用二分查找找到合适的段
         segment_idx = bisect_right(boundaries, value) - 1
         if segment_idx < 0:
             segment_idx = 0
         elif segment_idx >= len(segments):
             segment_idx = len(segments) - 1
-            
+
         # 使用选定的段进行预测
         prediction = segments[segment_idx].predict(value)
         return max(0, min(1, prediction))  # 归一化到[0,1]范围
 
+
 class RMIModel:
     """递归模型索引(RMI)实现，用于建模属性的CDF"""
+
     def __init__(self, num_models: int = 2):
         self.num_models = num_models
         self.models = []  # 存储每个阶段的模型
@@ -139,7 +146,7 @@ class RMIModel:
         self.min_value = 0.0
         self.max_value = 0.0
         self.total_points = 0
-        
+
     def fit(self, values: List[float], indices: List[int]):
         """训练RMI模型来建模CDF
         参数:
@@ -148,27 +155,27 @@ class RMIModel:
         """
         if not values:
             return
-            
+
         # 保存数据范围信息
         self.min_value = min(values)
         self.max_value = max(values)
         self.total_points = len(values)
-        
+
         # 对值进行排序
         sorted_pairs = sorted(zip(values, indices))
         values, indices = zip(*sorted_pairs)
         values = list(values)
         indices = list(indices)
-        
+
         # 计算每个阶段的数据范围
         total_range = self.max_value - self.min_value
         stage_size = total_range / self.num_models
-        
+
         # 为每个阶段训练一个线性模型
         for i in range(self.num_models):
             stage_min = self.min_value + i * stage_size
             stage_max = stage_min + stage_size
-            
+
             # 获取该阶段的数据点
             stage_values = []
             stage_indices = []
@@ -176,7 +183,7 @@ class RMIModel:
                 if stage_min <= v <= stage_max:
                     stage_values.append(v)
                     stage_indices.append(idx)
-            
+
             if stage_values:
                 # 计算线性模型的参数
                 if len(stage_values) > 1:
@@ -187,7 +194,7 @@ class RMIModel:
                 else:
                     slope = 0
                     intercept = stage_indices[0] / self.total_points
-                
+
                 self.models.append((slope, intercept))
                 self.stage_boundaries.append(stage_min)
             else:
@@ -197,19 +204,19 @@ class RMIModel:
                 else:
                     self.models.append((0, 0))
                 self.stage_boundaries.append(stage_min)
-    
+
     def predict(self, value: float) -> float:
         """使用RMI模型预测CDF值"""
         if not self.models:
             return 0.0
-            
+
         # 找到合适的阶段
         stage_idx = bisect_right(self.stage_boundaries, value) - 1
         if stage_idx < 0:
             stage_idx = 0
         elif stage_idx >= len(self.models):
             stage_idx = len(self.models) - 1
-            
+
         # 使用该阶段的模型进行预测
         slope, intercept = self.models[stage_idx]
         prediction = slope * value + intercept
@@ -220,10 +227,12 @@ class RMIModel:
         cdf_value = self.predict(value)
         return min(int(cdf_value * num_columns), num_columns - 1)
 
+
 class LayoutOptimizer:
     """布局优化算法实现"""
-    def __init__(self, dataset: List[Point], queries: List[Query], 
-                 sample_rate: float = 0.1, num_partitions: int = 2,
+
+    def __init__(self, dataset: List[Point], queries: List[Query],
+                 sample_rate: float = 0.1, num_partitions: int = 10,
                  error_threshold: float = 0.1):
         self.dataset = dataset
         self.queries = queries
@@ -232,19 +241,19 @@ class LayoutOptimizer:
         self.dimensions = len(dataset[0].coordinates) if dataset else 0
         self.plm_models = [PLMModel(error_threshold) for _ in range(self.dimensions)]
         self.rmi_models = [RMIModel() for _ in range(self.dimensions)]  # 添加RMI模型
-        
+
     def sample_data(self) -> Tuple[List[Point], List[Query]]:
         """采样数据和查询"""
         # 采样数据点
         sample_size = int(len(self.dataset) * self.sample_rate)
         sampled_data = random.sample(self.dataset, sample_size)
-        
+
         # 采样查询
         sample_size = int(len(self.queries) * self.sample_rate)
         sampled_queries = random.sample(self.queries, sample_size)
-        
+
         return sampled_data, sampled_queries
-    
+
     def get_cell_id(self, point: Point, grid_sizes: List[float], dim_order: List[int]) -> Tuple[int, ...]:
         """获取点所在的单元格ID，使用CDF进行列划分"""
         cell_id = []
@@ -253,7 +262,7 @@ class LayoutOptimizer:
             col_idx = self.rmi_models[dim].get_column_index(point.coordinates[dim], self.num_partitions)
             cell_id.append(col_idx)
         return tuple(cell_id)
-        
+
     def flatten_data(self, data: List[Point], layout: Tuple[List[int], List[int]]) -> List[Point]:
         """使用RMI模型展平数据，基于CDF进行列划分
         参数:
@@ -263,14 +272,13 @@ class LayoutOptimizer:
             展平后的数据点
         """
         dim_order, col_counts = layout
-        grid_sizes = []
-        
+
         # 为每个维度训练RMI模型
         for dim in range(self.dimensions):
             values = [point.coordinates[dim] for point in data]
             indices = list(range(len(data)))
             self.rmi_models[dim].fit(values, indices)
-        
+
         # 使用训练好的RMI模型展平数据
         flattened_data = []
         for point in data:
@@ -286,9 +294,9 @@ class LayoutOptimizer:
                     # 将列索引映射回[0,1]范围
                     flattened_coords.append(col_idx / num_cols)
             flattened_data.append(Point(flattened_coords))
-        
+
         return flattened_data
-    
+
     def calculate_selectivity(self, queries: List[Query], dim: int) -> float:
         """计算给定维度的平均选择性"""
         total_selectivity = 0
@@ -296,21 +304,21 @@ class LayoutOptimizer:
             range_size = query.max_bounds[dim] - query.min_bounds[dim]
             total_selectivity += range_size
         return total_selectivity / len(queries) if queries else 0
-    
+
     def get_dimension_order(self, sort_dim: int) -> List[int]:
         """根据选择性生成维度顺序"""
         # 计算每个维度的选择性
-        selectivities = [(dim, self.calculate_selectivity(self.queries, dim)) 
-                        for dim in range(self.dimensions) if dim != sort_dim]
-        
+        selectivities = [(dim, self.calculate_selectivity(self.queries, dim))
+                         for dim in range(self.dimensions) if dim != sort_dim]
+
         # 按选择性从高到低排序
         sorted_dims = [dim for dim, _ in sorted(selectivities, key=lambda x: x[1], reverse=True)]
-        
+
         # 将排序维度放在最后
         return sorted_dims + [sort_dim]
-    
-    def refine_candidates(self, data: List[Point], query: Query, 
-                         candidates: List[Point]) -> List[Point]:#精确过滤
+
+    def refine_candidates(self, data: List[Point], query: Query,
+                          candidates: List[Point]) -> List[Point]:
         """细化过程：对候选点进行精确过滤
         参数:
             data: 原始数据集
@@ -331,8 +339,8 @@ class LayoutOptimizer:
                 refined_points.append(point)
         return refined_points
 
-    def estimate_query_time(self, data: List[Point], query: Query, 
-                          layout: Tuple[List[int], List[int]]) -> Tuple[float, Dict[str, float]]:
+    def estimate_query_time(self, data: List[Point], query: Query,
+                            layout: Tuple[List[int], List[int]]) -> Tuple[float, Dict[str, float]]:
         """估计给定布局下的查询时间
         成本模型: Time(D,q,L) = wp*Nc + wr*Nc + ws*Ns
         其中:
@@ -344,39 +352,39 @@ class LayoutOptimizer:
         """
         dim_order, col_counts = layout
         grid_sizes = []
-        
+
         # 计算每个维度的网格大小
         for i, dim in enumerate(dim_order[:-1]):
             values = [point.coordinates[dim] for point in data]
             min_val, max_val = min(values), max(values)
             grid_size = (max_val - min_val) / col_counts[i] if max_val != min_val else 1.0
             grid_sizes.append(grid_size)
-        
+
         # 计算查询范围内的单元格数量 (Nc)
         cells_to_scan = 1
         for i, (dim, grid_size) in enumerate(zip(dim_order[:-1], grid_sizes)):
             query_range = query.max_bounds[dim] - query.min_bounds[dim]
             cells_in_dim = math.ceil(query_range / grid_size)
             cells_to_scan *= cells_in_dim
-        
+
         # 估计需要扫描的点数 (Ns)
         # 使用网格密度来估计
         total_cells = np.prod(col_counts)
         avg_points_per_cell = len(data) / total_cells
         estimated_points = cells_to_scan * avg_points_per_cell
-        
+
         # 成本模型参数
         wp = 0.1  # 投影时间常数
         wr = 0.2  # 细化时间常数
         ws = 0.05  # 扫描时间常数
-        
+
         # 计算总成本
         projection_cost = wp * cells_to_scan  # 投影成本
         refinement_cost = wr * cells_to_scan  # 细化成本
-        scan_cost = ws * estimated_points     # 扫描成本
-        
+        scan_cost = ws * estimated_points  # 扫描成本
+
         total_cost = projection_cost + refinement_cost + scan_cost
-        
+
         # 返回总成本和详细的成本组成
         cost_details = {
             'total_cost': total_cost,
@@ -389,323 +397,164 @@ class LayoutOptimizer:
             'wr': wr,
             'ws': ws
         }
-        
+
         return total_cost, cost_details
 
     def execute_query(self, query: Query, layout: Tuple[List[int], List[int]]) -> List[Point]:
-        """执行查询，包括投影、细化和扫描三个步骤
-        参数:
-            query: 查询范围
-            layout: 布局信息 (维度顺序, 列数)
-        返回:
-            匹配查询的点列表
-        """
-        dim_order, col_counts = layout  # 从布局参数获取维度顺序和列数
+        """执行查询，包括投影、细化和扫描过程"""
+        dim_order, col_counts = layout
         sort_dim = dim_order[-1]  # 获取排序维度
-        grid_sizes = []
-        
+
         # 1. 投影过程：找到查询范围内的单元格
-        # 计算每个维度的网格大小
-        for i, dim in enumerate(dim_order[:-1]):
-            values = [point.coordinates[dim] for point in self.dataset]
-            min_val, max_val = min(values), max(values)
-            grid_size = (max_val - min_val) / col_counts[i] if max_val != min_val else 1.0
-            grid_sizes.append(grid_size)
-        
-        # 计算查询范围内的单元格
         cells_to_scan = []
-        for i, (dim, grid_size) in enumerate(zip(dim_order[:-1], grid_sizes)):
-            values = [point.coordinates[dim] for point in self.dataset]
-            min_val = min(values)
-            min_cell = math.floor((query.min_bounds[dim] - min_val) / grid_size)
-            max_cell = math.ceil((query.max_bounds[dim] - min_val) / grid_size)
-            cells_to_scan.append((min_cell, max_cell))
-        
-        # 2. 细化过程：使用PLM模型细化扫描范围
-        refined_ranges = []
-        for cell_id in self._generate_cell_ids(cells_to_scan):
-            if cell_id in self.plm_models[sort_dim].cell_segments:
-                # 获取该单元格的PLM模型
-                segments = self.plm_models[sort_dim].cell_segments[cell_id]
-                boundaries = self.plm_models[sort_dim].cell_boundaries[cell_id]
-                
-                # 使用PLM模型预测扫描范围的端点
-                start_idx = self._find_start_index(segments, boundaries, query.min_bounds[sort_dim])
-                end_idx = self._find_end_index(segments, boundaries, query.max_bounds[sort_dim])
-                
-                # 局部搜索修正预测错误
-                start_idx = self._local_search_correction(start_idx, query.min_bounds[sort_dim], True)
-                end_idx = self._local_search_correction(end_idx, query.max_bounds[sort_dim], False)
-                
-                refined_ranges.append((start_idx, end_idx))
-            else:
-                # 如果没有PLM模型，使用整个单元格范围
-                cell_points = self._get_cell_points(cell_id, dim_order, col_counts)
-                if cell_points:
-                    refined_ranges.append((0, len(cell_points) - 1))
-        
-        # 3. 扫描过程：处理匹配的记录
-        results = set()  # 使用集合来避免重复
-        for cell_id, (start_idx, end_idx) in zip(self._generate_cell_ids(cells_to_scan), refined_ranges):
-            cell_points = self._get_cell_points(cell_id, dim_order, col_counts)
-            if not cell_points:
-                continue
+        for i, dim in enumerate(dim_order[:-1]):
+            # 使用RMI模型预测查询范围的CDF值
+            min_cdf = self.rmi_models[dim].predict(query.min_bounds[dim])
+            max_cdf = self.rmi_models[dim].predict(query.max_bounds[dim])
             
-            # 扫描细化后的范围
-            for i in range(start_idx, end_idx + 1):
-                point = cell_points[i]
-                # 检查点是否在查询范围内
-                if self._point_in_query(point, query):
-                    # 将点的坐标转换为元组以便于添加到集合中
-                    point_tuple = tuple(point.coordinates)
-                    results.add(point_tuple)
-        
-        # 将结果转换回Point对象列表
-        return [Point(list(coords)) for coords in results]
+            # 将CDF值转换为列索引
+            min_col = int(min_cdf * col_counts[i])
+            max_col = int(max_cdf * col_counts[i])
+            cells_to_scan.append((min_col, max_col))
 
-    def _generate_cell_ids(self, cells_to_scan: List[Tuple[int, int]]) -> List[Tuple[int, ...]]:
-        """生成需要扫描的单元格ID列表"""
-        if not cells_to_scan:
-            return []
-        
-        def generate_combinations(current: List[int], dim: int):
-            if dim == len(cells_to_scan):
-                yield tuple(current)
-                return
-            
-            min_cell, max_cell = cells_to_scan[dim]
-            for cell in range(min_cell, max_cell + 1):
-                current.append(cell)
-                yield from generate_combinations(current, dim + 1)
-                current.pop()
-        
-        return list(generate_combinations([], 0))
-
-    def _find_start_index(self, segments: List[PLMSegment], boundaries: List[float], target: float) -> int:
-        """使用PLM模型找到起始索引"""
-        if not segments:
-            return 0
-        
-        # 使用二分查找找到合适的段
-        segment_idx = bisect_right(boundaries, target) - 1
-        if segment_idx < 0:
-            segment_idx = 0
-        elif segment_idx >= len(segments):
-            segment_idx = len(segments) - 1
-        
-        return int(segments[segment_idx].predict(target))
-
-    def _find_end_index(self, segments: List[PLMSegment], boundaries: List[float], target: float) -> int:
-        """使用PLM模型找到结束索引"""
-        if not segments:
-            return 0
-        
-        # 使用二分查找找到合适的段
-        segment_idx = bisect_right(boundaries, target) - 1
-        if segment_idx < 0:
-            segment_idx = 0
-        elif segment_idx >= len(segments):
-            segment_idx = len(segments) - 1
-        
-        return int(segments[segment_idx].predict(target))
-
-    def _local_search_correction(self, predicted_idx: int, target: float, is_start: bool) -> int:
-        """局部搜索修正预测错误"""
-        # 在实际应用中，这里应该实现局部搜索算法
-        # 当前简单实现，直接返回预测值
-        return predicted_idx
-
-    def _get_cell_points(self, cell_id: Tuple[int, ...], dim_order: List[int], col_counts: List[int]) -> List[Point]:
-        """获取指定单元格中的点
-        参数:
-            cell_id: 单元格ID
-            dim_order: 维度顺序
-            col_counts: 列数
-        返回:
-            该单元格中的点列表
-        """
-        cell_points = []
+        # 2. 获取候选点
+        candidates = []
         for point in self.dataset:
-            # 检查点是否在当前单元格中
-            in_cell = True
-            for i, dim in enumerate(dim_order[:-1]):  # 不包含排序维度
-                values = [p.coordinates[dim] for p in self.dataset]
-                min_val = min(values)
-                max_val = max(values)
-                grid_size = (max_val - min_val) / col_counts[i] if max_val != min_val else 1.0
-                cell_idx = math.floor((point.coordinates[dim] - min_val) / grid_size)
-                if cell_idx != cell_id[i]:
-                    in_cell = False
+            in_candidate_cells = True
+            for i, (dim, (min_col, max_col)) in enumerate(zip(dim_order[:-1], cells_to_scan)):
+                col_idx = self.rmi_models[dim].get_column_index(point.coordinates[dim], col_counts[i])
+                if not (min_col <= col_idx <= max_col):
+                    in_candidate_cells = False
                     break
-            if in_cell:
-                cell_points.append(point)
-        
-        # 按排序维度排序
-        sort_dim = dim_order[-1]
-        cell_points.sort(key=lambda p: p.coordinates[sort_dim])
-        
-        return cell_points
+            if in_candidate_cells:
+                candidates.append(point)
 
-    def _point_in_query(self, point: Point, query: Query) -> bool:
-        """检查点是否在查询范围内"""
-        for dim in range(len(point.coordinates)):
-            if not (query.min_bounds[dim] <= point.coordinates[dim] <= query.max_bounds[dim]):
-                return False
-        return True
+        # 3. 使用PLM模型进行细化
+        refined_points = []
+        for point in candidates:
+            # 检查点是否在查询范围内
+            if query.min_bounds[sort_dim] <= point.coordinates[sort_dim] <= query.max_bounds[sort_dim]:
+                refined_points.append(point)
 
-    def gradient_descent(self, data: List[Point], queries: List[Query], 
-                        dim_order: List[int], learning_rate: float = 0.1, 
-                        max_iterations: int = 100) -> Tuple[List[int], float, Dict[str, float]]:
+        return refined_points
+
+    def gradient_descent(self, data: List[Point], queries: List[Query],
+                         dim_order: List[int], learning_rate: float = 0.1,
+                         max_iterations: int = 100) -> Tuple[List[int], float, Dict[str, float]]:
         """使用梯度下降搜索最优列数"""
-        # 初始化列数，使用数据分布来设置初始值
-        col_counts = []
-        for i in range(self.dimensions - 1):
-            dim = dim_order[i]
-            values = [point.coordinates[dim] for point in data]
-            # 使用数据分布的标准差来设置初始列数
-            std_dev = np.std(values)
-            range_size = max(values) - min(values)
-            # 根据数据分布特征设置初始列数，限制在2-5之间
-            initial_cols = max(2, min(5, int(range_size / (3 * std_dev))))
-            col_counts.append(initial_cols)
-        
-        print(f"初始列数: {col_counts}")
-        
+        # 只为前 d-1 个维度分配列数
+        col_counts = [self.num_partitions] * (self.dimensions - 1)
         best_cost = float('inf')
         best_col_counts = col_counts.copy()
         best_cost_details = None
-        
-        # 动态学习率
-        current_lr = learning_rate
-        
+
         for iteration in range(max_iterations):
             # 计算当前成本
-            current_costs = [self.estimate_query_time(data, query, (dim_order, col_counts)) 
-                           for query in queries]
+            current_costs = [self.estimate_query_time(data, query, (dim_order, col_counts))
+                             for query in queries]
             current_cost = sum(cost for cost, _ in current_costs) / len(queries)
-            current_details = current_costs[0][1]
-            
+            current_details = current_costs[0][1]  # 使用第一个查询的详细信息
+
             if current_cost < best_cost:
                 best_cost = current_cost
                 best_col_counts = col_counts.copy()
                 best_cost_details = current_details
-                # 如果找到更好的解，增加学习率
-                current_lr = min(learning_rate * 1.1, 0.5)
-            else:
-                # 如果没有改善，减小学习率
-                current_lr = max(learning_rate * 0.5, 0.01)
-            
+
             # 计算梯度
             gradients = []
             for i in range(len(col_counts)):
-                # 正向扰动
-                perturbed_counts_plus = col_counts.copy()
-                perturbed_counts_plus[i] += 1
-                plus_costs = [self.estimate_query_time(data, query, (dim_order, perturbed_counts_plus)) 
-                             for query in queries]
-                plus_cost = sum(cost for cost, _ in plus_costs) / len(queries)
-                
-                # 负向扰动
-                perturbed_counts_minus = col_counts.copy()
-                perturbed_counts_minus[i] = max(2, perturbed_counts_minus[i] - 1)  # 最小列数改为2
-                minus_costs = [self.estimate_query_time(data, query, (dim_order, perturbed_counts_minus)) 
-                              for query in queries]
-                minus_cost = sum(cost for cost, _ in minus_costs) / len(queries)
-                
-                # 计算中心差分梯度
-                gradient = (plus_cost - minus_cost) / 2
+                # 扰动当前列数
+                perturbed_counts = col_counts.copy()
+                perturbed_counts[i] += 1
+
+                # 计算扰动后的成本
+                perturbed_costs = [self.estimate_query_time(data, query, (dim_order, perturbed_counts))
+                                   for query in queries]
+                perturbed_cost = sum(cost for cost, _ in perturbed_costs) / len(queries)
+
+                # 计算梯度
+                gradient = perturbed_cost - current_cost
                 gradients.append(gradient)
-            
+
             # 更新列数
             for i in range(len(col_counts)):
-                # 使用动态学习率更新
-                new_col = max(2, int(col_counts[i] - current_lr * gradients[i]))  # 最小列数改为2
-                # 限制最大列数
-                col_counts[i] = min(new_col, 5)  # 最大列数改为5
-            
+                col_counts[i] = max(2, int(col_counts[i] - learning_rate * gradients[i]))
+
             # 打印优化进度
             if iteration % 10 == 0:
                 print(f"迭代 {iteration}: 当前成本 = {current_cost:.2f}")
-                print(f"  当前列数: {col_counts}")
-                print(f"  学习率: {current_lr:.4f}")
-        
+                print(f"  投影成本: {current_details['projection_cost']:.2f}")
+                print(f"  细化成本: {current_details['refinement_cost']:.2f}")
+                print(f"  扫描成本: {current_details['scan_cost']:.2f}")
+
         return best_col_counts, best_cost, best_cost_details
-    
+
     def optimize_layout(self) -> Tuple[List[int], List[int], Dict[str, float]]:
         """执行布局优化算法"""
         print("\n开始布局优化...")
         sampled_data, sampled_queries = self.sample_data()
         print(f"采样数据点数量: {len(sampled_data)}")
         print(f"采样查询数量: {len(sampled_queries)}")
-        
-        # 初始化最佳布局
+
+        flattened_data = self.flatten_data(sampled_data, (self.get_dimension_order(self.dimensions - 1),
+                                                          [self.num_partitions] * (self.dimensions - 1)))
+        print("数据展平完成")
+
         best_cost = float('inf')
         best_layout = None
         best_cost_details = None
-        
-        # 确保至少有一个有效的布局
-        default_dim_order = list(range(self.dimensions))
-        default_col_counts = [self.num_partitions] * (self.dimensions - 1)
-        default_cost, default_details = self.estimate_query_time(sampled_data, sampled_queries[0], (default_dim_order, default_col_counts))
-        best_layout = (default_dim_order, default_col_counts)
-        best_cost = default_cost
-        best_cost_details = default_details
-        
+
         print("\n开始维度排序优化...")
         for sort_dim in range(self.dimensions):
             print(f"\n尝试维度 {sort_dim} 作为排序维度")
             dim_order = self.get_dimension_order(sort_dim)
             print(f"维度顺序: {dim_order}")
-            
-            try:
-                col_counts, cost, cost_details = self.gradient_descent(sampled_data, sampled_queries, dim_order)
-                print(f"当前布局成本: {cost:.2f}")
-                
-                if cost < best_cost:
-                    best_cost = cost
-                    best_layout = (dim_order, col_counts)
-                    best_cost_details = cost_details
-                    print(f"找到更好的布局! 成本: {best_cost:.2f}")
-            except Exception as e:
-                print(f"优化维度 {sort_dim} 时发生错误: {str(e)}")
-                continue
-        
-        if best_layout is None:
-            # 如果所有优化都失败，使用默认布局
-            best_layout = (default_dim_order, default_col_counts)
-            best_cost_details = default_details
-        
+
+            col_counts, cost, cost_details = self.gradient_descent(flattened_data, sampled_queries, dim_order)
+            print(f"当前布局成本: {cost:.2f}")
+
+            if cost < best_cost:
+                best_cost = cost
+                best_layout = (dim_order, col_counts)
+                best_cost_details = cost_details
+                print(f"找到更好的布局! 成本: {best_cost:.2f}")
+
         return best_layout, best_cost_details
 
+
 def main():
-    # 读取数据集
-    dataset = []
-    with open('data/node/foursquare2_0.05_5_b.txt', 'r') as f:
-        for line in f:
-            if line.strip():
-                x, y = map(float, line.strip().split(','))
-                dataset.append(Point([x, y]))
-    
-    # 读取查询集
-    queries = []
-    with open('data/node/foursquare2_0.05_5_q.txt', 'r') as f:
-        for line in f:
-            if line.strip():
-                min_x, min_y, max_x, max_y = map(float, line.strip().split(','))
-                queries.append(Query([min_x, min_y], [max_x, max_y]))
-    
-    print(f"加载了 {len(dataset)} 个数据点")
-    print(f"加载了 {len(queries)} 个查询")
-    
+    # 创建更大的示例数据集
+    dataset = [
+        Point([1.0, 2.0]),
+        Point([2.0, 3.0]),
+        Point([3.0, 1.0]),
+        Point([1.5, 2.5]),
+        Point([2.5, 1.5]),
+        Point([3.5, 2.5]),
+        Point([1.2, 3.2]),
+        Point([2.8, 1.8]),
+        Point([3.2, 2.8]),
+        Point([1.8, 2.2])
+    ]
+
+    # 创建更多的示例查询
+    queries = [
+        Query([1.0, 1.0], [2.0, 2.0]),
+        Query([2.0, 2.0], [3.0, 3.0]),
+        Query([1.5, 1.5], [2.5, 2.5]),
+        Query([2.5, 1.5], [3.5, 2.5]),
+        Query([1.2, 2.2], [2.2, 3.2])
+    ]
+
     # 创建布局优化器
     optimizer = LayoutOptimizer(dataset, queries, sample_rate=0.5, error_threshold=0.1)
-    
+
     # 执行优化
     best_layout, cost_details = optimizer.optimize_layout()
     print("\n最终优化结果:")
     print("维度顺序:", best_layout[0])
     print("列数:", best_layout[1])
-    
+
     # 输出每个维度的列数
     print("\n各维度列数:")
     for dim in range(optimizer.dimensions):
@@ -715,7 +564,7 @@ def main():
             # 找到非排序维度在dim_order中的位置
             dim_idx = best_layout[0].index(dim)
             print(f"维度 {dim}: {best_layout[1][dim_idx]}")
-    
+
     print("\n成本模型参数:")
     print(f"投影时间常数 (wp): {cost_details['wp']}")
     print(f"细化时间常数 (wr): {cost_details['wr']}")
@@ -727,60 +576,18 @@ def main():
     print(f"扫描成本: {cost_details['scan_cost']:.2f}")
     print(f"扫描单元格数: {cost_details['cells_to_scan']}")
     print(f"估计扫描点数: {cost_details['estimated_points']:.2f}")
-    
-    # 计算并输出每个维度的划分点
-    print("\n各维度划分点:")
-    dim_order, col_counts = best_layout
-    for i, dim in enumerate(dim_order[:-1]):  # 不包含排序维度
-        values = [point.coordinates[dim] for point in dataset]
-        min_val, max_val = min(values), max(values)
-        grid_size = (max_val - min_val) / col_counts[i] if max_val != min_val else 1.0
-        partition_points = [min_val + j * grid_size for j in range(col_counts[i] + 1)]
-        print(f"维度 {dim} 的划分点: {[f'{x:.2f}' for x in partition_points]}")
-    
-    # 输出每个单元格的数据
-    print("\n各单元格数据:")
-    grid_sizes = []
-    for i, dim in enumerate(dim_order[:-1]):
-        values = [point.coordinates[dim] for point in dataset]
-        min_val, max_val = min(values), max(values)
-        grid_size = (max_val - min_val) / col_counts[i] if max_val != min_val else 1.0
-        grid_sizes.append(grid_size)
-    
-    # 创建单元格字典
-    cells = {}
-    for point in dataset:
-        cell_id = optimizer.get_cell_id(point, grid_sizes, dim_order)
-        if cell_id not in cells:
-            cells[cell_id] = []
-        cells[cell_id].append(point)
-    
-    # 输出每个单元格的统计信息
-    print("\n单元格统计信息:")
-    total_cells = len(cells)
-    print(f"总单元格数: {total_cells}")
-    
-    for cell_id, points in sorted(cells.items()):
-        print(f"\n单元格 {cell_id}:")
-        print(f"  包含 {len(points)} 个点")
-        # 计算该单元格中点的坐标范围
-        x_coords = [p.coordinates[0] for p in points]
-        y_coords = [p.coordinates[1] for p in points]
-        print(f"  X坐标范围: {min(x_coords):.1f} - {max(x_coords):.1f}")
-        print(f"  Y坐标范围: {min(y_coords):.1f} - {max(y_coords):.1f}")
-        print(f"  平均密度: {len(points)/len(dataset)*100:.1f}%")
-    
+
     # 执行示例查询
     print("\n执行示例查询:")
     for i, query in enumerate(queries):
         results = optimizer.execute_query(query, best_layout)
         print(f"\n查询 {i}:")
-        print(f"查询范围: ({query.min_bounds[0]:.1f}, {query.min_bounds[1]:.1f}) - ({query.max_bounds[0]:.1f}, {query.max_bounds[1]:.1f})")
+        print(
+            f"查询范围: ({query.min_bounds[0]}, {query.min_bounds[1]}) - ({query.max_bounds[0]}, {query.max_bounds[1]})")
         print(f"找到 {len(results)} 个结果点:")
-        # 对结果进行排序，使输出更有序
-        sorted_results = sorted(results, key=lambda p: (p.coordinates[0], p.coordinates[1]))
-        for point in sorted_results:
-            print(f"  ({point.coordinates[0]:.2f}, {point.coordinates[1]:.2f})")
+        for point in results:
+            print(f"  ({point.coordinates[0]}, {point.coordinates[1]})")
+
 
 if __name__ == "__main__":
-    main() 
+    main()
