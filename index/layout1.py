@@ -344,47 +344,51 @@ class LayoutOptimizer:
         """估计给定布局下的查询时间
         成本模型: Time(D,q,L) = wp*Nc + wr*Nc + ws*Ns
         其中:
-        - wp: 在单个单元格上执行投影的平均时间
-        - wr: 在单元格上执行细化的平均时间
-        - ws: 每次扫描点的平均时间
+        - wp: 投影时间常数，取决于数据集和查询特征
+        - wr: 细化时间常数，取决于数据集和查询特征
+        - ws: 扫描时间常数，取决于数据集和查询特征
         - Nc: 查询矩形内的单元格数量
         - Ns: 需要扫描的点数
         """
         dim_order, col_counts = layout
-        grid_sizes = []
-
-        # 计算每个维度的网格大小
-        for i, dim in enumerate(dim_order[:-1]):
-            values = [point.coordinates[dim] for point in data]
-            min_val, max_val = min(values), max(values)
-            grid_size = (max_val - min_val) / col_counts[i] if max_val != min_val else 1.0
-            grid_sizes.append(grid_size)
-
-        # 计算查询范围内的单元格数量 (Nc)
+        
+        # 1. 计算查询范围内的单元格数量 (Nc)
         cells_to_scan = 1
-        for i, (dim, grid_size) in enumerate(zip(dim_order[:-1], grid_sizes)):
-            query_range = query.max_bounds[dim] - query.min_bounds[dim]
-            cells_in_dim = math.ceil(query_range / grid_size)
+        for i, dim in enumerate(dim_order[:-1]):
+            # 使用RMI模型预测查询范围的CDF值
+            min_cdf = max(0.0, min(1.0, self.rmi_models[dim].predict(query.min_bounds[dim])))
+            max_cdf = max(0.0, min(1.0, self.rmi_models[dim].predict(query.max_bounds[dim])))
+            
+            # 计算查询范围内的列数
+            min_col = int(min_cdf * col_counts[i])
+            max_col = int(max_cdf * col_counts[i])
+            cells_in_dim = max(1, max_col - min_col + 1)  # 确保至少有一个单元格
             cells_to_scan *= cells_in_dim
-
-        # 估计需要扫描的点数 (Ns)
+        
+        # 2. 估计需要扫描的点数 (Ns)
         # 使用网格密度来估计
-        total_cells = np.prod(col_counts)
+        total_cells = max(1, np.prod(col_counts))  # 确保至少有一个单元格
         avg_points_per_cell = len(data) / total_cells
-        estimated_points = cells_to_scan * avg_points_per_cell
-
-        # 成本模型参数
-        wp = 0.1  # 投影时间常数
-        wr = 0.2  # 细化时间常数
-        ws = 0.05  # 扫描时间常数
-
-        # 计算总成本
+        estimated_points = max(1, cells_to_scan * avg_points_per_cell)  # 确保至少有一个点
+        
+        # 3. 计算成本模型参数
+        # 这些参数应该基于数据集和查询的特征来动态调整
+        query_size = max(0.1, np.prod([max(0.1, query.max_bounds[i] - query.min_bounds[i]) 
+                                     for i in range(self.dimensions)]))
+        data_density = max(0.1, len(data) / (self.dimensions * 100))  # 假设数据范围是[0,100]
+        
+        # 动态调整权重，确保最小成本
+        wp = max(0.1, 0.1 * (1 + query_size))  # 查询范围越大，投影开销越大
+        wr = max(0.1, 0.2 * (1 + data_density))  # 数据密度越大，细化开销越大
+        ws = max(0.1, 0.05 * (1 + 1/query_size))  # 查询范围越小，扫描开销越大
+        
+        # 4. 计算总成本
         projection_cost = wp * cells_to_scan  # 投影成本
         refinement_cost = wr * cells_to_scan  # 细化成本
-        scan_cost = ws * estimated_points  # 扫描成本
-
+        scan_cost = ws * estimated_points     # 扫描成本
+        
         total_cost = projection_cost + refinement_cost + scan_cost
-
+        
         # 返回总成本和详细的成本组成
         cost_details = {
             'total_cost': total_cost,
@@ -395,13 +399,19 @@ class LayoutOptimizer:
             'estimated_points': estimated_points,
             'wp': wp,
             'wr': wr,
-            'ws': ws
+            'ws': ws,
+            'query_size': query_size,
+            'data_density': data_density
         }
-
+        
         return total_cost, cost_details
 
-    def execute_query(self, query: Query, layout: Tuple[List[int], List[int]]) -> List[Point]:
-        """执行查询，包括投影、细化和扫描过程"""
+    def execute_query(self, query: Query, layout: Tuple[List[int], List[int]]) -> Tuple[List[Point], int, int]:
+        """执行查询，包括投影、细化和扫描过程
+        返回:
+            (结果点列表, 扫描单元格数, 扫描点数)
+        """
+
         dim_order, col_counts = layout
         sort_dim = dim_order[-1]  # 获取排序维度
 
@@ -417,6 +427,11 @@ class LayoutOptimizer:
             max_col = int(max_cdf * col_counts[i])
             cells_to_scan.append((min_col, max_col))
 
+        # 计算查询范围内的单元格数量 (Nc)
+        Nc = 1
+        for min_col, max_col in cells_to_scan:
+            Nc *= (max_col - min_col + 1)
+
         # 2. 获取候选点
         candidates = []
         for point in self.dataset:
@@ -431,62 +446,147 @@ class LayoutOptimizer:
 
         # 3. 使用PLM模型进行细化
         refined_points = []
+        # 创建单元格字典来存储每个单元格中的点
+        cells = {}
         for point in candidates:
+            # 获取点所在的单元格坐标
+            cell_coords = []
+            for i, (dim, (min_col, max_col)) in enumerate(zip(dim_order[:-1], cells_to_scan)):
+                col_idx = self.rmi_models[dim].get_column_index(point.coordinates[dim], col_counts[i])
+                cell_coords.append(col_idx)
+            
             # 检查点是否在查询范围内
             if query.min_bounds[sort_dim] <= point.coordinates[sort_dim] <= query.max_bounds[sort_dim]:
                 refined_points.append(point)
+                # 将点添加到对应的单元格中
+                cell_key = tuple(cell_coords)
+                if cell_key not in cells:
+                    cells[cell_key] = []
+                cells[cell_key].append(point)
 
-        return refined_points
+        # 输出查询统计信息
+        Ns = len(refined_points)
+        print(f"\n查询统计信息:")
+        print(f"查询范围: ({query.min_bounds[0]:.1f}, {query.min_bounds[1]:.1f}) - ({query.max_bounds[0]:.1f}, {query.max_bounds[1]:.1f})")
+        print(f"扫描单元格数 (Nc): {Nc}")
+        print(f"扫描点数 (Ns): {Ns}")
+        if Nc > 0:
+            print(f"平均每单元格点数: {Ns/Nc:.2f}")
+        else:
+            print("平均每单元格点数: N/A (无扫描单元格)")
+
+        # 输出每个单元格的详细信息
+        print("\n单元格详细信息:")
+        for cell_key, points in cells.items():
+            # 计算单元格的范围
+            cell_ranges = []
+            for i, (dim, col_idx) in enumerate(zip(dim_order[:-1], cell_key)):
+                # 计算该维度的单元格范围
+                total_cols = col_counts[i]
+                cell_width = 1.0 / total_cols
+                min_val = col_idx * cell_width
+                max_val = (col_idx + 1) * cell_width
+                cell_ranges.append((dim, min_val, max_val))
+
+            print(f"\n单元格 {cell_key}:")
+            print("单元格范围:")
+            for dim, min_val, max_val in cell_ranges:
+                print(f"  维度 {dim}: [{min_val:.3f}, {max_val:.3f}]")
+            print(f"包含点数: {len(points)}")
+            print("点坐标:")
+            for point in points:
+                print(f"  ({point.coordinates[0]:.3f}, {point.coordinates[1]:.3f})")
+
+        return refined_points, Nc, Ns
 
     def gradient_descent(self, data: List[Point], queries: List[Query],
-                         dim_order: List[int], learning_rate: float = 0.1,
-                         max_iterations: int = 100) -> Tuple[List[int], float, Dict[str, float]]:
-        """使用梯度下降搜索最优列数"""
-        # 只为前 d-1 个维度分配列数
-        col_counts = [self.num_partitions] * (self.dimensions - 1)
+                        dim_order: List[int], learning_rate: float = 0.1,
+                        max_iterations: int = 100) -> Tuple[List[int], float, Dict[str, float]]:
+        """使用梯度下降搜索最优列数
+        参数:
+            data: 数据样本
+            queries: 查询样本
+            dim_order: 维度顺序
+            learning_rate: 学习率
+            max_iterations: 最大迭代次数
+        返回:
+            最优列数, 最小成本, 成本详情
+        """
+        # 初始化列数，使用数据分布来设置初始值
+        col_counts = []
+        for i in range(self.dimensions - 1):
+            dim = dim_order[i]
+            values = [point.coordinates[dim] for point in data]
+            # 使用数据分布的标准差来设置初始列数
+            std_dev = np.std(values)
+            range_size = max(values) - min(values)
+            # 根据数据分布特征设置初始列数，限制在2-5之间
+            initial_cols = max(2, min(5, int(range_size / (3 * std_dev))))
+            col_counts.append(initial_cols)
+        
+        print(f"初始列数: {col_counts}")
+        
         best_cost = float('inf')
         best_col_counts = col_counts.copy()
         best_cost_details = None
-
+        
+        # 动态学习率
+        current_lr = learning_rate
+        
         for iteration in range(max_iterations):
             # 计算当前成本
-            current_costs = [self.estimate_query_time(data, query, (dim_order, col_counts))
-                             for query in queries]
+            current_costs = [self.estimate_query_time(data, query, (dim_order, col_counts)) 
+                            for query in queries]
             current_cost = sum(cost for cost, _ in current_costs) / len(queries)
-            current_details = current_costs[0][1]  # 使用第一个查询的详细信息
-
+            current_details = current_costs[0][1]
+            
             if current_cost < best_cost:
                 best_cost = current_cost
                 best_col_counts = col_counts.copy()
                 best_cost_details = current_details
-
+                # 如果找到更好的解，增加学习率
+                current_lr = min(learning_rate * 1.1, 0.5)
+            else:
+                # 如果没有改善，减小学习率
+                current_lr = max(learning_rate * 0.5, 0.01)
+            
             # 计算梯度
             gradients = []
             for i in range(len(col_counts)):
-                # 扰动当前列数
-                perturbed_counts = col_counts.copy()
-                perturbed_counts[i] += 1
-
-                # 计算扰动后的成本
-                perturbed_costs = [self.estimate_query_time(data, query, (dim_order, perturbed_counts))
-                                   for query in queries]
-                perturbed_cost = sum(cost for cost, _ in perturbed_costs) / len(queries)
-
-                # 计算梯度
-                gradient = perturbed_cost - current_cost
+                # 正向扰动
+                perturbed_counts_plus = col_counts.copy()
+                perturbed_counts_plus[i] += 1
+                plus_costs = [self.estimate_query_time(data, query, (dim_order, perturbed_counts_plus)) 
+                             for query in queries]
+                plus_cost = sum(cost for cost, _ in plus_costs) / len(queries)
+                
+                # 负向扰动
+                perturbed_counts_minus = col_counts.copy()
+                perturbed_counts_minus[i] = max(2, perturbed_counts_minus[i] - 1)
+                minus_costs = [self.estimate_query_time(data, query, (dim_order, perturbed_counts_minus)) 
+                              for query in queries]
+                minus_cost = sum(cost for cost, _ in minus_costs) / len(queries)
+                
+                # 计算中心差分梯度
+                gradient = (plus_cost - minus_cost) / 2
                 gradients.append(gradient)
-
+            
             # 更新列数
             for i in range(len(col_counts)):
-                col_counts[i] = max(2, int(col_counts[i] - learning_rate * gradients[i]))
-
+                # 使用动态学习率更新
+                new_col = max(2, int(col_counts[i] - current_lr * gradients[i]))
+                # 限制最大列数
+                col_counts[i] = min(new_col, 5)
+            
             # 打印优化进度
             if iteration % 10 == 0:
                 print(f"迭代 {iteration}: 当前成本 = {current_cost:.2f}")
+                print(f"  当前列数: {col_counts}")
+                print(f"  学习率: {current_lr:.4f}")
                 print(f"  投影成本: {current_details['projection_cost']:.2f}")
                 print(f"  细化成本: {current_details['refinement_cost']:.2f}")
                 print(f"  扫描成本: {current_details['scan_cost']:.2f}")
-
+        
         return best_col_counts, best_cost, best_cost_details
 
     def optimize_layout(self) -> Tuple[List[int], List[int], Dict[str, float]]:
@@ -579,14 +679,25 @@ def main():
 
     # 执行示例查询
     print("\n执行示例查询:")
+    total_Nc = 0
+    total_Ns = 0
     for i, query in enumerate(queries):
-        results = optimizer.execute_query(query, best_layout)
-        print(f"\n查询 {i}:")
-        print(
-            f"查询范围: ({query.min_bounds[0]}, {query.min_bounds[1]}) - ({query.max_bounds[0]}, {query.max_bounds[1]})")
+        results, Nc, Ns = optimizer.execute_query(query, best_layout)
+        total_Nc += Nc
+        total_Ns += Ns
+        print(f"\n查询 {i} 结果:")
         print(f"找到 {len(results)} 个结果点:")
         for point in results:
-            print(f"  ({point.coordinates[0]}, {point.coordinates[1]})")
+            print(f"  ({point.coordinates[0]:.2f}, {point.coordinates[1]:.2f})")
+    
+    # 输出平均统计信息
+    print("\n查询性能统计:")
+    print(f"平均扫描单元格数 (Nc): {total_Nc/len(queries):.2f}")
+    print(f"平均扫描点数 (Ns): {total_Ns/len(queries):.2f}")
+    if total_Nc > 0:
+        print(f"平均每单元格点数: {total_Ns/total_Nc:.2f}")
+    else:
+        print("平均每单元格点数: 0.00")
 
 
 if __name__ == "__main__":
