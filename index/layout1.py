@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import math
 from bisect import bisect_right
 import time
-from index.cost_model import FloodCostModel, QueryStats, CostWeights
+from cost_model import FloodCostModel, QueryStats, CostWeights
 
 
 @dataclass
