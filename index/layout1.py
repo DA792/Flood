@@ -146,6 +146,24 @@ class RMIModel:
         self.min_value = 0.0
         self.max_value = 0.0
         self.total_points = 0
+        self.cdf_boundaries = []  # 存储CDF边界值
+
+    def predict(self, value: float) -> float:
+        """使用RMI模型预测CDF值"""
+        if not self.models:
+            return 0.0
+
+        # 找到合适的阶段
+        stage_idx = bisect_right(self.stage_boundaries, value) - 1
+        if stage_idx < 0:
+            stage_idx = 0
+        elif stage_idx >= len(self.models):
+            stage_idx = len(self.models) - 1
+
+        # 使用该阶段的模型进行预测
+        slope, intercept = self.models[stage_idx]
+        prediction = slope * value + intercept
+        return max(0, min(1, prediction))  # 归一化到[0,1]范围
 
     def fit(self, values: List[float], indices: List[int]):
         """训练RMI模型来建模CDF
@@ -205,27 +223,22 @@ class RMIModel:
                     self.models.append((0, 0))
                 self.stage_boundaries.append(stage_min)
 
-    def predict(self, value: float) -> float:
-        """使用RMI模型预测CDF值"""
-        if not self.models:
-            return 0.0
-
-        # 找到合适的阶段
-        stage_idx = bisect_right(self.stage_boundaries, value) - 1
-        if stage_idx < 0:
-            stage_idx = 0
-        elif stage_idx >= len(self.models):
-            stage_idx = len(self.models) - 1
-
-        # 使用该阶段的模型进行预测
-        slope, intercept = self.models[stage_idx]
-        prediction = slope * value + intercept
-        return max(0, min(1, prediction))  # 归一化到[0,1]范围
+    def compute_cdf_boundaries(self, num_columns: int):
+        """计算等深度划分的CDF边界值"""
+        self.cdf_boundaries = []
+        for i in range(num_columns + 1):
+            self.cdf_boundaries.append(i / num_columns)
 
     def get_column_index(self, value: float, num_columns: int) -> int:
         """根据CDF值确定点应该被分配到哪个列"""
         cdf_value = self.predict(value)
         return min(int(cdf_value * num_columns), num_columns - 1)
+
+    def get_column_boundaries(self, num_columns: int) -> List[float]:
+        """获取等深度划分的列边界值"""
+        if not self.cdf_boundaries or len(self.cdf_boundaries) != num_columns + 1:
+            self.compute_cdf_boundaries(num_columns)
+        return self.cdf_boundaries
 
 
 class LayoutOptimizer:
@@ -264,7 +277,7 @@ class LayoutOptimizer:
         return tuple(cell_id)
 
     def flatten_data(self, data: List[Point], layout: Tuple[List[int], List[int]]) -> List[Point]:
-        """使用RMI模型展平数据，基于CDF进行列划分
+        """使用CDF进行等深度划分
         参数:
             data: 原始数据点
             layout: 布局信息 (维度顺序, 列数)
@@ -273,43 +286,7 @@ class LayoutOptimizer:
         """
         dim_order, col_counts = layout
 
-        # 为每个维度训练RMI模型
-        for dim in range(self.dimensions):
-            values = [point.coordinates[dim] for point in data]
-            indices = list(range(len(data)))
-            self.rmi_models[dim].fit(values, indices)
-
-        # 输出每个维度的切割点信息
-        print("\n数据展平后的网格划分信息:")
-        for i, dim in enumerate(dim_order[:-1]):  # 不包含排序维度
-            num_cols = col_counts[i]  # 使用优化后的列数
-            print(f"\n维度 {dim} 的划分信息:")
-            print(f"列数: {num_cols}")
-            print("切割点位置:")
-            for j in range(num_cols + 1):
-                split_point = j / num_cols
-                print(f"  切割点 {j}: {split_point:.3f}")
-
-        # 输出每个单元格的范围
-        print("\n单元格范围信息:")
-        cell_ranges = {}
-        for i, dim in enumerate(dim_order[:-1]):
-            num_cols = col_counts[i]  # 使用优化后的列数
-            for col in range(num_cols):
-                cell_key = tuple([col if j == i else 0 for j in range(len(dim_order)-1)])
-                if cell_key not in cell_ranges:
-                    cell_ranges[cell_key] = []
-                min_val = col / num_cols
-                max_val = (col + 1) / num_cols
-                cell_ranges[cell_key].append((dim, min_val, max_val))
-
-        for cell_key, ranges in cell_ranges.items():
-            print(f"\n单元格 {cell_key}:")
-            print("范围:")
-            for dim, min_val, max_val in ranges:
-                print(f"  维度 {dim}: [{min_val:.3f}, {max_val:.3f}]")
-
-        # 使用训练好的RMI模型展平数据
+        # 使用训练好的RMI模型进行等深度划分
         flattened_data = []
         for point in data:
             flattened_coords = []
@@ -317,9 +294,9 @@ class LayoutOptimizer:
                 if dim == dim_order[-1]:  # 如果是排序维度，保持原值
                     flattened_coords.append(point.coordinates[dim])
                 else:
-                    # 使用CDF值进行列划分
+                    # 使用CDF值进行等深度划分
                     dim_idx = dim_order.index(dim)
-                    num_cols = col_counts[dim_idx]  # 使用优化后的列数
+                    num_cols = col_counts[dim_idx]
                     col_idx = self.rmi_models[dim].get_column_index(point.coordinates[dim], num_cols)
                     # 将列索引映射回[0,1]范围
                     flattened_coords.append(col_idx / num_cols)
@@ -484,14 +461,32 @@ class LayoutOptimizer:
                 col_idx = self.rmi_models[dim].get_column_index(point.coordinates[dim], col_counts[i])
                 cell_coords.append(col_idx)
             
-            # 检查点是否在查询范围内
-            if query.min_bounds[sort_dim] <= point.coordinates[sort_dim] <= query.max_bounds[sort_dim]:
-                refined_points.append(point)
-                # 将点添加到对应的单元格中
-                cell_key = tuple(cell_coords)
-                if cell_key not in cells:
-                    cells[cell_key] = []
-                cells[cell_key].append(point)
+            # 将点添加到对应的单元格中
+            cell_key = tuple(cell_coords)
+            if cell_key not in cells:
+                cells[cell_key] = []
+            cells[cell_key].append(point)
+
+        # 对每个单元格中的点进行细化
+        for cell_key, points in cells.items():
+            # 首先对非排序维度进行范围检查
+            refined_cell_points = points.copy()
+            for dim in range(self.dimensions):
+                if dim != sort_dim:  # 非排序维度使用直接范围检查
+                    refined_cell_points = [p for p in refined_cell_points 
+                                         if query.min_bounds[dim] <= p.coordinates[dim] <= query.max_bounds[dim]]
+            
+            # 对排序维度使用PLM模型进行细化
+            if refined_cell_points:
+                # 获取排序维度的值
+                sort_values = [p.coordinates[sort_dim] for p in refined_cell_points]
+                # 使用PLM模型预测
+                predictions = [self.plm_models[sort_dim].predict(v, cell_key) for v in sort_values]
+                # 根据预测结果进行细化
+                refined_cell_points = [p for p, pred in zip(refined_cell_points, predictions)
+                                    if query.min_bounds[sort_dim] <= p.coordinates[sort_dim] <= query.max_bounds[sort_dim]]
+            
+            refined_points.extend(refined_cell_points)
 
         # 输出查询统计信息
         Ns = len(refined_points)
@@ -503,6 +498,34 @@ class LayoutOptimizer:
             print(f"平均每单元格点数: {Ns/Nc:.2f}")
         else:
             print("平均每单元格点数: N/A (无扫描单元格)")
+
+        # 输出每个单元格的详细信息
+        print("\n单元格详细信息:")
+        for cell_key, points in cells.items():
+            # 计算单元格的范围
+            cell_ranges = []
+            for i, (dim, col_idx) in enumerate(zip(dim_order[:-1], cell_key)):
+                # 计算该维度的单元格范围
+                total_cols = col_counts[i]
+                cell_width = 1.0 / total_cols
+                min_val = col_idx * cell_width
+                max_val = (col_idx + 1) * cell_width
+                cell_ranges.append((dim, min_val, max_val))
+
+            print(f"\n单元格 {cell_key}:")
+            print("单元格范围:")
+            for dim, min_val, max_val in cell_ranges:
+                print(f"  维度 {dim}: [{min_val:.3f}, {max_val:.3f}]")
+            print(f"包含点数: {len(points)}")
+            print("点坐标:")
+            for point in points:
+                print(f"  ({', '.join([f'{coord:.3f}' for coord in point.coordinates])})")
+
+        # 输出细化后的点
+        print("\n细化后的点:")
+        print(f"总数: {len(refined_points)}")
+        for point in refined_points:
+            print(f"  ({', '.join([f'{coord:.3f}' for coord in point.coordinates])})")
 
         return refined_points, Nc, Ns
 
@@ -603,6 +626,12 @@ class LayoutOptimizer:
         print(f"采样数据点数量: {len(sampled_data)}")
         print(f"采样查询数量: {len(sampled_queries)}")
 
+        # 为每个维度训练RMI模型
+        for dim in range(self.dimensions):
+            values = [point.coordinates[dim] for point in sampled_data]
+            indices = list(range(len(sampled_data)))
+            self.rmi_models[dim].fit(values, indices)
+
         best_cost = float('inf')
         best_layout = None
         best_cost_details = None
@@ -613,13 +642,8 @@ class LayoutOptimizer:
             dim_order = self.get_dimension_order(sort_dim)
             print(f"维度顺序: {dim_order}")
 
-            # 使用初始列数进行数据展平
-            initial_layout = (dim_order, [self.num_partitions] * (self.dimensions - 1))
-            flattened_data = self.flatten_data(sampled_data, initial_layout)
-            print("初始数据展平完成")
-
-            # 使用展平后的数据进行梯度下降优化
-            col_counts, cost, cost_details = self.gradient_descent(flattened_data, sampled_queries, dim_order)
+            # 使用梯度下降优化列数
+            col_counts, cost, cost_details = self.gradient_descent(sampled_data, sampled_queries, dim_order)
             print(f"当前布局成本: {cost:.2f}")
 
             if cost < best_cost:
@@ -628,9 +652,16 @@ class LayoutOptimizer:
                 best_cost_details = cost_details
                 print(f"找到更好的布局! 成本: {best_cost:.2f}")
 
-        # 使用最终优化后的布局进行数据展平
-        final_flattened_data = self.flatten_data(sampled_data, best_layout)
-        print("最终数据展平完成")
+        # 使用优化后的列数进行等深度划分
+        print("\n执行等深度划分:")
+        for i, dim in enumerate(best_layout[0][:-1]):  # 不包含排序维度
+            num_cols = best_layout[1][i]
+            print(f"\n维度 {dim} 的等深度划分:")
+            print(f"列数: {num_cols}")
+            boundaries = self.rmi_models[dim].get_column_boundaries(num_cols)
+            print("CDF边界值:")
+            for j, boundary in enumerate(boundaries):
+                print(f"  边界 {j}: {boundary:.3f}")
 
         return best_layout, best_cost_details
 
