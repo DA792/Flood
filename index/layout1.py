@@ -232,7 +232,7 @@ class LayoutOptimizer:
     """布局优化算法实现"""
 
     def __init__(self, dataset: List[Point], queries: List[Query],
-                 sample_rate: float = 0.1, num_partitions: int = 10,
+                 sample_rate: float = 0.1, num_partitions: int = 3,
                  error_threshold: float = 0.1):
         self.dataset = dataset
         self.queries = queries
@@ -240,7 +240,7 @@ class LayoutOptimizer:
         self.num_partitions = num_partitions
         self.dimensions = len(dataset[0].coordinates) if dataset else 0
         self.plm_models = [PLMModel(error_threshold) for _ in range(self.dimensions)]
-        self.rmi_models = [RMIModel() for _ in range(self.dimensions)]  # 添加RMI模型
+        self.rmi_models = [RMIModel() for _ in range(self.dimensions)]
 
     def sample_data(self) -> Tuple[List[Point], List[Query]]:
         """采样数据和查询"""
@@ -279,6 +279,36 @@ class LayoutOptimizer:
             indices = list(range(len(data)))
             self.rmi_models[dim].fit(values, indices)
 
+        # 输出每个维度的切割点信息
+        print("\n数据展平后的网格划分信息:")
+        for i, dim in enumerate(dim_order[:-1]):  # 不包含排序维度
+            num_cols = col_counts[i]  # 使用优化后的列数
+            print(f"\n维度 {dim} 的划分信息:")
+            print(f"列数: {num_cols}")
+            print("切割点位置:")
+            for j in range(num_cols + 1):
+                split_point = j / num_cols
+                print(f"  切割点 {j}: {split_point:.3f}")
+
+        # 输出每个单元格的范围
+        print("\n单元格范围信息:")
+        cell_ranges = {}
+        for i, dim in enumerate(dim_order[:-1]):
+            num_cols = col_counts[i]  # 使用优化后的列数
+            for col in range(num_cols):
+                cell_key = tuple([col if j == i else 0 for j in range(len(dim_order)-1)])
+                if cell_key not in cell_ranges:
+                    cell_ranges[cell_key] = []
+                min_val = col / num_cols
+                max_val = (col + 1) / num_cols
+                cell_ranges[cell_key].append((dim, min_val, max_val))
+
+        for cell_key, ranges in cell_ranges.items():
+            print(f"\n单元格 {cell_key}:")
+            print("范围:")
+            for dim, min_val, max_val in ranges:
+                print(f"  维度 {dim}: [{min_val:.3f}, {max_val:.3f}]")
+
         # 使用训练好的RMI模型展平数据
         flattened_data = []
         for point in data:
@@ -289,7 +319,7 @@ class LayoutOptimizer:
                 else:
                     # 使用CDF值进行列划分
                     dim_idx = dim_order.index(dim)
-                    num_cols = col_counts[dim_idx]
+                    num_cols = col_counts[dim_idx]  # 使用优化后的列数
                     col_idx = self.rmi_models[dim].get_column_index(point.coordinates[dim], num_cols)
                     # 将列索引映射回[0,1]范围
                     flattened_coords.append(col_idx / num_cols)
@@ -411,7 +441,6 @@ class LayoutOptimizer:
         返回:
             (结果点列表, 扫描单元格数, 扫描点数)
         """
-
         dim_order, col_counts = layout
         sort_dim = dim_order[-1]  # 获取排序维度
 
@@ -474,28 +503,6 @@ class LayoutOptimizer:
             print(f"平均每单元格点数: {Ns/Nc:.2f}")
         else:
             print("平均每单元格点数: N/A (无扫描单元格)")
-
-        # 输出每个单元格的详细信息
-        print("\n单元格详细信息:")
-        for cell_key, points in cells.items():
-            # 计算单元格的范围
-            cell_ranges = []
-            for i, (dim, col_idx) in enumerate(zip(dim_order[:-1], cell_key)):
-                # 计算该维度的单元格范围
-                total_cols = col_counts[i]
-                cell_width = 1.0 / total_cols
-                min_val = col_idx * cell_width
-                max_val = (col_idx + 1) * cell_width
-                cell_ranges.append((dim, min_val, max_val))
-
-            print(f"\n单元格 {cell_key}:")
-            print("单元格范围:")
-            for dim, min_val, max_val in cell_ranges:
-                print(f"  维度 {dim}: [{min_val:.3f}, {max_val:.3f}]")
-            print(f"包含点数: {len(points)}")
-            print("点坐标:")
-            for point in points:
-                print(f"  ({point.coordinates[0]:.3f}, {point.coordinates[1]:.3f})")
 
         return refined_points, Nc, Ns
 
@@ -596,10 +603,6 @@ class LayoutOptimizer:
         print(f"采样数据点数量: {len(sampled_data)}")
         print(f"采样查询数量: {len(sampled_queries)}")
 
-        flattened_data = self.flatten_data(sampled_data, (self.get_dimension_order(self.dimensions - 1),
-                                                          [self.num_partitions] * (self.dimensions - 1)))
-        print("数据展平完成")
-
         best_cost = float('inf')
         best_layout = None
         best_cost_details = None
@@ -610,6 +613,12 @@ class LayoutOptimizer:
             dim_order = self.get_dimension_order(sort_dim)
             print(f"维度顺序: {dim_order}")
 
+            # 使用初始列数进行数据展平
+            initial_layout = (dim_order, [self.num_partitions] * (self.dimensions - 1))
+            flattened_data = self.flatten_data(sampled_data, initial_layout)
+            print("初始数据展平完成")
+
+            # 使用展平后的数据进行梯度下降优化
             col_counts, cost, cost_details = self.gradient_descent(flattened_data, sampled_queries, dim_order)
             print(f"当前布局成本: {cost:.2f}")
 
@@ -618,6 +627,10 @@ class LayoutOptimizer:
                 best_layout = (dim_order, col_counts)
                 best_cost_details = cost_details
                 print(f"找到更好的布局! 成本: {best_cost:.2f}")
+
+        # 使用最终优化后的布局进行数据展平
+        final_flattened_data = self.flatten_data(sampled_data, best_layout)
+        print("最终数据展平完成")
 
         return best_layout, best_cost_details
 
@@ -646,8 +659,8 @@ def main():
         Query([1.2, 2.2], [2.2, 3.2])
     ]
 
-    # 创建布局优化器
-    optimizer = LayoutOptimizer(dataset, queries, sample_rate=0.5, error_threshold=0.1)
+    # 创建布局优化器，使用较小的初始分区数
+    optimizer = LayoutOptimizer(dataset, queries, sample_rate=0.5, num_partitions=3, error_threshold=0.1)
 
     # 执行优化
     best_layout, cost_details = optimizer.optimize_layout()
