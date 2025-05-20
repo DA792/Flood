@@ -7,6 +7,19 @@ import time
 
 
 @dataclass
+class Point:
+    """表示多维空间中的一个点"""
+    coordinates: List[float]
+
+
+@dataclass
+class Query:
+    """表示一个范围查询"""
+    min_bounds: List[float]  # 查询范围的最小边界
+    max_bounds: List[float]  # 查询范围的最大边界
+
+
+@dataclass
 class QueryStats:
     """查询统计信息"""
     num_cells: int  # 与查询矩形相交的单元格数量 (Nc)
@@ -101,12 +114,16 @@ class FloodCostModel:
 
 def generate_training_data(num_samples: int, 
                          dimensions: int,
-                         num_queries: int) -> List[Tuple[QueryStats, CostWeights]]:
+                         num_queries: int,
+                         dataset: List[Point],
+                         queries: List[Query]) -> List[Tuple[QueryStats, CostWeights]]:
     """生成训练数据
     参数:
         num_samples: 训练样本数量
         dimensions: 数据维度
         num_queries: 每个布局的查询数量
+        dataset: 数据集
+        queries: 查询列表
     返回:
         训练数据列表
     """
@@ -117,65 +134,134 @@ def generate_training_data(num_samples: int,
         dim_order = list(range(dimensions))
         random.shuffle(dim_order)
         col_counts = [random.randint(2, 5) for _ in range(dimensions-1)]
-        
-        # 生成随机查询
-        queries = []
-        for _ in range(num_queries):
-            min_bounds = [random.random() for _ in range(dimensions)]
-            max_bounds = [min_bounds[i] + random.random() * 0.5 
-                         for i in range(dimensions)]
-            queries.append((min_bounds, max_bounds))
+        layout = (dim_order, col_counts)
         
         # 对每个查询测量实际执行时间
         for query in queries:
-            # 模拟查询执行并收集统计信息
+            # 开始计时
             start_time = time.time()
             
-            # 这里应该调用实际的查询执行代码
-            # 为了演示，我们生成一些随机统计信息
-            stats = QueryStats(
-                num_cells=random.randint(1, 10),
-                num_points=random.randint(10, 100),
-                total_cells=random.randint(100, 1000),
-                avg_cell_size=random.random(),
-                median_cell_size=random.random(),
-                cell_size_quantiles=[random.random() for _ in range(4)],
-                num_filtered_dims=random.randint(1, dimensions),
-                avg_points_per_cell=random.random() * 10,
-                points_in_exact_range=random.randint(5, 50)
-            )
+            # 1. 投影阶段
+            projection_start = time.time()
+            # 计算查询范围内的单元格
+            cells_to_scan = []
+            for i, dim in enumerate(dim_order[:-1]):
+                min_cdf = 0.0  # 这里应该使用RMI模型预测
+                max_cdf = 1.0  # 这里应该使用RMI模型预测
+                min_col = int(min_cdf * col_counts[i])
+                max_col = int(max_cdf * col_counts[i])
+                cells_to_scan.append((min_col, max_col))
+            projection_time = time.time() - projection_start
             
-            # 测量各个阶段的执行时间
-            projection_time = random.random() * 0.1
-            refinement_time = random.random() * 0.2
-            scan_time = random.random() * 0.3
+            # 2. 细化阶段
+            refinement_start = time.time()
+            # 获取候选点
+            candidates = []
+            for point in dataset:
+                in_candidate_cells = True
+                for i, (dim, (min_col, max_col)) in enumerate(zip(dim_order[:-1], cells_to_scan)):
+                    col_idx = 0  # 这里应该使用RMI模型预测
+                    if not (min_col <= col_idx <= max_col):
+                        in_candidate_cells = False
+                        break
+                if in_candidate_cells:
+                    candidates.append(point)
+            refinement_time = time.time() - refinement_start
+            
+            # 3. 扫描阶段
+            scan_start = time.time()
+            # 对候选点进行细化
+            refined_points = []
+            for point in candidates:
+                if all(query.min_bounds[dim] <= point.coordinates[dim] <= query.max_bounds[dim] 
+                      for dim in range(dimensions)):
+                    refined_points.append(point)
+            scan_time = time.time() - scan_start
+            
+            # 计算总时间
+            total_time = time.time() - start_time
+            
+            # 收集统计信息
+            num_cells = 1
+            for min_col, max_col in cells_to_scan:
+                num_cells *= (max_col - min_col + 1)
+            
+            # 计算单元格大小统计信息
+            cell_sizes = []
+            for i in range(dimensions-1):
+                cell_width = 1.0 / col_counts[i]
+                cell_sizes.append(cell_width)
+            
+            stats = QueryStats(
+                num_cells=num_cells,
+                num_points=len(refined_points),
+                total_cells=np.prod(col_counts),
+                avg_cell_size=np.mean(cell_sizes),
+                median_cell_size=np.median(cell_sizes),
+                cell_size_quantiles=np.percentile(cell_sizes, [25, 50, 75, 90]),
+                num_filtered_dims=dimensions,
+                avg_points_per_cell=len(refined_points) / num_cells if num_cells > 0 else 0,
+                points_in_exact_range=len(refined_points)
+            )
             
             # 计算权重
             weights = CostWeights(
-                wp=projection_time / stats.num_cells if stats.num_cells > 0 else 0,
-                wr=refinement_time / stats.num_cells if stats.num_cells > 0 else 0,
-                ws=scan_time / stats.num_points if stats.num_points > 0 else 0
+                wp=projection_time / num_cells if num_cells > 0 else 0,
+                wr=refinement_time / num_cells if num_cells > 0 else 0,
+                ws=scan_time / len(refined_points) if len(refined_points) > 0 else 0
             )
             
             training_data.append((stats, weights))
+            
+            print(f"查询执行时间: {total_time:.4f}秒")
+            print(f"投影时间: {projection_time:.4f}秒")
+            print(f"细化时间: {refinement_time:.4f}秒")
+            print(f"扫描时间: {scan_time:.4f}秒")
+            print(f"权重: wp={weights.wp:.6f}, wr={weights.wr:.6f}, ws={weights.ws:.6f}")
+            print("---")
     
     return training_data
 
 
 def main():
+    # 创建示例数据集
+    dataset = [
+        Point([1.0, 2.0]),
+        Point([2.0, 3.0]),
+        Point([3.0, 1.0]),
+        Point([1.5, 2.5]),
+        Point([2.5, 1.5]),
+        Point([3.5, 2.5]),
+        Point([1.2, 3.2]),
+        Point([2.8, 1.8]),
+        Point([3.2, 2.8]),
+        Point([1.8, 2.2])
+    ]
+
+    # 创建示例查询
+    queries = [
+        Query([1.0, 1.0], [2.0, 2.0]),
+        Query([2.0, 2.0], [3.0, 3.0]),
+        Query([1.5, 1.5], [2.5, 2.5]),
+        Query([2.5, 1.5], [3.5, 2.5]),
+        Query([1.2, 2.2], [2.2, 3.2])
+    ]
+
     # 创建成本模型
     cost_model = FloodCostModel()
     
     # 生成训练数据
     print("生成训练数据...")
     training_data = generate_training_data(
-        num_samples=100,  # 生成100个训练样本
-        dimensions=3,     # 3维数据
-        num_queries=10    # 每个布局10个查询
+        num_samples=10,  # 生成10个训练样本
+        dimensions=2,    # 2维数据
+        num_queries=5,   # 每个布局5个查询
+        dataset=dataset,
+        queries=queries
     )
     
     # 训练模型
-    print("训练模型...")
+    print("\n训练模型...")
     cost_model.train(training_data)
     
     # 测试模型
