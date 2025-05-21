@@ -362,7 +362,7 @@ class LayoutOptimizer:
         dim_order, col_counts = layout
         
         # 1. 计算查询范围内的单元格数量 (Nc)
-        cells_to_scan = 1
+        cells_to_scan = []
         for i, dim in enumerate(dim_order[:-1]):
             # 使用RMI模型预测查询范围的CDF值
             min_cdf = max(0.0, min(1.0, self.rmi_models[dim].predict(query.min_bounds[dim])))
@@ -372,29 +372,50 @@ class LayoutOptimizer:
             min_col = int(min_cdf * col_counts[i])
             max_col = int(max_cdf * col_counts[i])
             cells_in_dim = max(1, max_col - min_col + 1)  # 确保至少有一个单元格
-            cells_to_scan *= cells_in_dim
+            cells_to_scan.append((min_col, max_col))
+        
+        Nc = 1
+        for min_col, max_col in cells_to_scan:
+            Nc *= (max_col - min_col + 1)
         
         # 2. 估计需要扫描的点数 (Ns)
         # 使用网格密度来估计
         total_cells = max(1, np.prod(col_counts))  # 确保至少有一个单元格
         avg_points_per_cell = len(data) / total_cells
-        estimated_points = max(1, cells_to_scan * avg_points_per_cell)  # 确保至少有一个点
+        estimated_points = max(1, Nc * avg_points_per_cell)  # 确保至少有一个点
         
-        # 3. 计算成本模型参数
-        # 这些参数应该基于数据集和查询的特征来动态调整
-        query_size = max(0.1, np.prod([max(0.1, query.max_bounds[i] - query.min_bounds[i]) 
-                                     for i in range(self.dimensions)]))
-        data_density = max(0.1, len(data) / (self.dimensions * 100))  # 假设数据范围是[0,100]
+        # 3. 计算查询统计信息
+        # 计算单元格大小统计信息
+        cell_sizes = []
+        for i in range(self.dimensions-1):
+            cell_width = 1.0 / col_counts[i]
+            cell_sizes.append(cell_width)
         
-        # 动态调整权重，确保最小成本
-        wp = max(0.1, 0.1 * (1 + query_size))  # 查询范围越大，投影开销越大
-        wr = max(0.1, 0.2 * (1 + data_density))  # 数据密度越大，细化开销越大
-        ws = max(0.1, 0.05 * (1 + 1/query_size))  # 查询范围越小，扫描开销越大
+        # 计算查询过滤的维度数量
+        num_filtered_dims = sum(1 for dim in range(self.dimensions) 
+                              if query.min_bounds[dim] > 0 or query.max_bounds[dim] < 100)
         
-        # 4. 计算总成本
-        projection_cost = wp * cells_to_scan  # 投影成本
-        refinement_cost = wr * cells_to_scan  # 细化成本
-        scan_cost = ws * estimated_points     # 扫描成本
+        # 创建查询统计信息
+        stats = QueryStats(
+            num_cells=Nc,
+            num_points=estimated_points,
+            total_cells=total_cells,
+            avg_cell_size=np.mean(cell_sizes),
+            median_cell_size=np.median(cell_sizes),
+            cell_size_quantiles=np.percentile(cell_sizes, [25, 50, 75, 90]),
+            num_filtered_dims=num_filtered_dims,
+            avg_points_per_cell=avg_points_per_cell,
+            points_in_exact_range=estimated_points
+        )
+        
+        # 4. 使用训练好的随机森林模型预测权重
+        cost_model = FloodCostModel()
+        weights = cost_model.predict_weights(stats)
+        
+        # 5. 计算总成本
+        projection_cost = weights.wp * Nc  # 投影成本
+        refinement_cost = weights.wr * Nc  # 细化成本
+        scan_cost = weights.ws * estimated_points  # 扫描成本
         
         total_cost = projection_cost + refinement_cost + scan_cost
         
@@ -404,13 +425,14 @@ class LayoutOptimizer:
             'projection_cost': projection_cost,
             'refinement_cost': refinement_cost,
             'scan_cost': scan_cost,
-            'cells_to_scan': cells_to_scan,
+            'cells_to_scan': Nc,
             'estimated_points': estimated_points,
-            'wp': wp,
-            'wr': wr,
-            'ws': ws,
-            'query_size': query_size,
-            'data_density': data_density
+            'wp': weights.wp,
+            'wr': weights.wr,
+            'ws': weights.ws,
+            'query_size': np.prod([max(0.1, query.max_bounds[i] - query.min_bounds[i]) 
+                                 for i in range(self.dimensions)]),
+            'data_density': len(data) / (self.dimensions * 100)
         }
         
         return total_cost, cost_details
@@ -442,32 +464,16 @@ class LayoutOptimizer:
             Nc *= (max_col - min_col + 1)
         
         # 模拟投影阶段的延迟
-        time.sleep(0.001 * Nc)  # 每个单元格0.001秒的延迟
+        time.sleep(0.01 * Nc)  # 每个单元格0.01秒的延迟
         projection_time = time.time() - projection_start
 
-        # 2. 获取候选点
+        # 2. 细化过程
         refinement_start = time.time()
         candidates = []
-        for point in self.dataset:
-            in_candidate_cells = True
-            for i, (dim, (min_col, max_col)) in enumerate(zip(dim_order[:-1], cells_to_scan)):
-                col_idx = self.rmi_models[dim].get_column_index(point.coordinates[dim], col_counts[i])
-                if not (min_col <= col_idx <= max_col):
-                    in_candidate_cells = False
-                    break
-            if in_candidate_cells:
-                candidates.append(point)
         
-        # 模拟细化阶段的延迟
-        time.sleep(0.0005 * len(candidates))  # 每个候选点0.0005秒的延迟
-        refinement_time = time.time() - refinement_start
-
-        # 3. 使用PLM模型进行细化
-        scan_start = time.time()
-        refined_points = []
         # 创建单元格字典来存储每个单元格中的点
         cells = {}
-        for point in candidates:
+        for point in self.dataset:
             # 获取点所在的单元格坐标
             cell_coords = []
             for i, (dim, (min_col, max_col)) in enumerate(zip(dim_order[:-1], cells_to_scan)):
@@ -491,18 +497,51 @@ class LayoutOptimizer:
             
             # 对排序维度使用PLM模型进行细化
             if refined_cell_points:
-                # 获取排序维度的值
+                # 按排序维度排序
+                refined_cell_points.sort(key=lambda p: p.coordinates[sort_dim])
                 sort_values = [p.coordinates[sort_dim] for p in refined_cell_points]
+                sort_indices = list(range(len(refined_cell_points)))
+                
                 # 使用PLM模型预测
-                predictions = [self.plm_models[sort_dim].predict(v, cell_key) for v in sort_values]
-                # 根据预测结果进行细化
-                refined_cell_points = [p for p, pred in zip(refined_cell_points, predictions)
-                                    if query.min_bounds[sort_dim] <= p.coordinates[sort_dim] <= query.max_bounds[sort_dim]]
-            
-            refined_points.extend(refined_cell_points)
+                predicted_start = int(self.plm_models[sort_dim].predict(query.min_bounds[sort_dim], cell_key))
+                predicted_end = int(self.plm_models[sort_dim].predict(query.max_bounds[sort_dim], cell_key))
+                
+                # 执行局部搜索来纠正预测
+                search_range = 10  # 局部搜索的范围
+                start_idx = max(0, predicted_start - search_range)
+                end_idx = min(len(sort_values), predicted_end + search_range)
+                
+                # 找到第一个大于等于query.min_bounds[sort_dim]的索引
+                actual_start = start_idx
+                for i in range(start_idx, end_idx):
+                    if sort_values[i] >= query.min_bounds[sort_dim]:
+                        actual_start = i
+                        break
+                
+                # 找到最后一个小于等于query.max_bounds[sort_dim]的索引
+                actual_end = end_idx - 1
+                for i in range(end_idx - 1, start_idx - 1, -1):
+                    if sort_values[i] <= query.max_bounds[sort_dim]:
+                        actual_end = i
+                        break
+                
+                # 添加细化后的点
+                candidates.extend(refined_cell_points[actual_start:actual_end+1])
+        
+        # 模拟细化阶段的延迟
+        time.sleep(0.005 * len(candidates))  # 每个候选点0.005秒的延迟
+        refinement_time = time.time() - refinement_start
+
+        # 3. 扫描阶段
+        scan_start = time.time()
+        refined_points = []
+        for point in candidates:
+            if all(query.min_bounds[dim] <= point.coordinates[dim] <= query.max_bounds[dim] 
+                  for dim in range(self.dimensions)):
+                refined_points.append(point)
         
         # 模拟扫描阶段的延迟
-        time.sleep(0.0001 * len(refined_points))  # 每个结果点0.0001秒的延迟
+        time.sleep(0.001 * len(refined_points))  # 每个结果点0.001秒的延迟
         scan_time = time.time() - scan_start
 
         # 计算实际的权重
