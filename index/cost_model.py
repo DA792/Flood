@@ -2,31 +2,8 @@ import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from typing import List, Tuple, Dict
 import random
-from dataclasses import dataclass
 import time
-from layout1 import LayoutOptimizer, Point, Query
-
-
-@dataclass
-class QueryStats:
-    """查询统计信息"""
-    num_cells: int  # 与查询矩形相交的单元格数量 (Nc)
-    num_points: int  # 扫描的点数 (Ns)
-    total_cells: int  # 总单元格数
-    avg_cell_size: float  # 可过滤单元格大小的平均值
-    median_cell_size: float  # 可过滤单元格大小的中位数
-    cell_size_quantiles: List[float]  # 可过滤单元格大小的分位数
-    num_filtered_dims: int  # 查询过滤的维度数量
-    avg_points_per_cell: float  # 每个访问单元格中访问的平均点数
-    points_in_exact_range: int  # 在精确子范围中访问的点数
-
-
-@dataclass
-class CostWeights:
-    """成本权重"""
-    wp: float  # 投影时间常数
-    wr: float  # 细化时间常数
-    ws: float  # 扫描时间常数
+from data_structures import Point, Query, QueryStats, CostWeights
 
 
 class FloodCostModel:
@@ -110,10 +87,7 @@ def generate_training_data(num_samples: int,
     """生成训练数据"""
     training_data = []
     
-    # 创建布局优化器
-    optimizer = LayoutOptimizer(dataset, queries, sample_rate=0.5, num_partitions=3, error_threshold=0.1)
-    
-    # 只生成10个随机布局
+    # 只生成10个随机布局用于训练
     num_layouts = 10
     print(f"\n生成{num_layouts}个随机布局的训练数据...")
     
@@ -123,9 +97,21 @@ def generate_training_data(num_samples: int,
         # 生成随机布局
         dim_order = list(range(dimensions))
         random.shuffle(dim_order)
-        # 使用固定的列数
-        col_counts = [4, 4]  # 使用4x4的网格
-        total_cells = 16
+        
+        # 为每个维度随机生成列数，确保总单元格数在合理范围内
+        col_counts = []
+        remaining_cells = random.randint(16, 64)  # 总单元格数在16到64之间
+        for i in range(dimensions-1):
+            if i == dimensions-2:  # 最后一个维度
+                col_counts.append(remaining_cells)
+            else:
+                # 随机分配列数，但确保不会导致总单元格数过大
+                max_cols = int(remaining_cells ** (1/(dimensions-i-1)))
+                cols = random.randint(2, max(3, max_cols))
+                col_counts.append(cols)
+                remaining_cells //= cols
+        
+        total_cells = np.prod(col_counts)
         
         layout = (dim_order, col_counts)
         print(f"布局 {layout_idx + 1}:")
@@ -133,10 +119,63 @@ def generate_training_data(num_samples: int,
         print(f"  列数: {col_counts}")
         print(f"  总单元格数: {total_cells}")
         
-        # 对每个查询使用layout1.py的执行逻辑
+        # 对每个查询执行
         for query_idx, query in enumerate(queries):
-            # 使用layout1.py的execute_query方法执行查询
-            refined_points, Nc, Ns = optimizer.execute_query(query, layout)
+            # 1. 投影阶段
+            cells_to_scan = []
+            for i, dim in enumerate(dim_order[:-1]):
+                min_cdf = query.min_bounds[dim] / 100.0
+                max_cdf = query.max_bounds[dim] / 100.0
+                min_col = int(min_cdf * col_counts[i])
+                max_col = int(max_cdf * col_counts[i])
+                cells_to_scan.append((min_col, max_col))
+            
+            # 计算查询范围内的单元格数量 (Nc)
+            Nc = 1
+            for min_col, max_col in cells_to_scan:
+                Nc *= (max_col - min_col + 1)
+            
+            # 记录投影阶段开始时间
+            projection_start = time.time()
+            
+            # 模拟投影阶段的延迟
+            time.sleep(0.01 * Nc)  # 每个单元格0.01秒
+            
+            # 2. 细化阶段
+            candidates = []
+            for point in dataset:
+                in_candidate_cells = True
+                for i, (dim, (min_col, max_col)) in enumerate(zip(dim_order[:-1], cells_to_scan)):
+                    col_idx = int((point.coordinates[dim] / 100.0) * col_counts[i])
+                    if not (min_col <= col_idx <= max_col):
+                        in_candidate_cells = False
+                        break
+                if in_candidate_cells:
+                    candidates.append(point)
+            
+            # 记录细化阶段开始时间
+            refinement_start = time.time()
+            
+            # 模拟细化阶段的延迟
+            time.sleep(0.005 * len(candidates))  # 每个候选点0.005秒
+            
+            # 3. 扫描阶段
+            refined_points = []
+            for point in candidates:
+                if all(query.min_bounds[dim] <= point.coordinates[dim] <= query.max_bounds[dim] 
+                      for dim in range(dimensions)):
+                    refined_points.append(point)
+            
+            # 记录扫描阶段结束时间
+            scan_end = time.time()
+            
+            # 模拟扫描阶段的延迟
+            time.sleep(0.001 * len(refined_points))  # 每个结果点0.001秒
+            
+            # 计算各阶段的实际执行时间
+            projection_time = refinement_start - projection_start
+            refinement_time = scan_end - refinement_start
+            scan_time = scan_end - refinement_start
             
             # 计算单元格大小统计信息
             cell_sizes = []
@@ -151,24 +190,20 @@ def generate_training_data(num_samples: int,
             # 创建查询统计信息
             stats = QueryStats(
                 num_cells=Nc,
-                num_points=Ns,
+                num_points=len(refined_points),
                 total_cells=total_cells,
                 avg_cell_size=np.mean(cell_sizes),
                 median_cell_size=np.median(cell_sizes),
                 cell_size_quantiles=np.percentile(cell_sizes, [25, 50, 75, 90]),
                 num_filtered_dims=num_filtered_dims,
-                avg_points_per_cell=Ns / Nc if Nc > 0 else 0,
+                avg_points_per_cell=len(refined_points) / Nc if Nc > 0 else 0,
                 points_in_exact_range=len(refined_points)
             )
             
-            # 使用layout1.py中的实际执行时间计算权重
-            projection_time = 0.01 * Nc
-            refinement_time = 0.005 * Nc
-            scan_time = 0.001 * Ns
-            
+            # 计算实际权重
             wp = projection_time / Nc if Nc > 0 else 0
             wr = refinement_time / Nc if Nc > 0 else 0
-            ws = scan_time / Ns if Ns > 0 else 0
+            ws = scan_time / len(refined_points) if len(refined_points) > 0 else 0
             
             weights = CostWeights(wp=wp, wr=wr, ws=ws)
             
@@ -177,8 +212,8 @@ def generate_training_data(num_samples: int,
             if query_idx % 5 == 0:
                 print(f"  查询 {query_idx + 1}/{len(queries)}:")
                 print(f"    扫描单元格数 (Nc): {Nc}")
-                print(f"    扫描点数 (Ns): {Ns}")
-                print(f"    权重: wp={weights.wp:.6f}, wr={weights.wr:.6f}, ws={weights.ws:.6f}")
+                print(f"    扫描点数 (Ns): {len(refined_points)}")
+                print(f"    实际权重: wp={weights.wp:.6f}, wr={weights.wr:.6f}, ws={weights.ws:.6f}")
     
     print(f"\n总共生成了 {len(training_data)} 个训练样本")
     return training_data
@@ -224,8 +259,6 @@ def main():
     
     # 测试模型
     print("\n测试模型:")
-    # 创建布局优化器用于测试
-    optimizer = LayoutOptimizer(dataset, queries, sample_rate=0.5, num_partitions=3, error_threshold=0.1)
     
     # 为每个测试查询计算统计信息并评估模型
     total_estimated_time = 0
@@ -236,42 +269,91 @@ def main():
         print(f"\n测试查询 {i+1}:")
         print(f"查询范围: ({query.min_bounds[0]:.1f}, {query.min_bounds[1]:.1f}) - ({query.max_bounds[0]:.1f}, {query.max_bounds[1]:.1f})")
         
-        # 使用layout1.py的execute_query方法执行查询
-        refined_points, Nc, Ns = optimizer.execute_query(query, ([0, 1], [4, 4]))
+        # 使用最优布局进行测试（这里使用8x8网格作为示例）
+        dim_order = [0, 1]  # 最优维度顺序
+        col_counts = [8, 8]  # 最优列数配置
+        total_cells = 64
         
-        # 计算单元格大小统计信息
-        cell_sizes = [1.0/4, 1.0/4]  # 使用4列
+        # 1. 投影阶段
+        cells_to_scan = []
+        for dim in range(2):
+            min_cdf = query.min_bounds[dim] / 100.0
+            max_cdf = query.max_bounds[dim] / 100.0
+            min_col = int(min_cdf * col_counts[dim])
+            max_col = int(max_cdf * col_counts[dim])
+            cells_to_scan.append((min_col, max_col))
+        
+        # 计算单元格数量
+        Nc = 1
+        for min_col, max_col in cells_to_scan:
+            Nc *= (max_col - min_col + 1)
+        
+        # 记录投影阶段开始时间
+        projection_start = time.time()
+        
+        # 模拟投影阶段的延迟
+        time.sleep(0.01 * Nc)  # 每个单元格0.01秒
+        
+        # 2. 计算扫描的点数
+        candidates = []
+        for point in dataset:
+            in_candidate_cells = True
+            for i, (dim, (min_col, max_col)) in enumerate(zip(dim_order[:-1], cells_to_scan)):
+                col_idx = int((point.coordinates[dim] / 100.0) * col_counts[i])
+                if not (min_col <= col_idx <= max_col):
+                    in_candidate_cells = False
+                    break
+            if in_candidate_cells:
+                candidates.append(point)
+        
+        # 记录细化阶段开始时间
+        refinement_start = time.time()
+        
+        # 模拟细化阶段的延迟
+        time.sleep(0.005 * len(candidates))  # 每个候选点0.005秒
+        
+        # 3. 扫描阶段
+        refined_points = []
+        for point in candidates:
+            if all(query.min_bounds[dim] <= point.coordinates[dim] <= query.max_bounds[dim] 
+                  for dim in range(2)):
+                refined_points.append(point)
+        
+        # 记录扫描阶段结束时间
+        scan_end = time.time()
+        
+        # 模拟扫描阶段的延迟
+        time.sleep(0.001 * len(refined_points))  # 每个结果点0.001秒
+        
+        # 3. 计算单元格大小统计信息
+        cell_sizes = [1.0/8, 1.0/8]  # 8x8网格
         
         # 创建查询统计信息
         test_stats = QueryStats(
             num_cells=Nc,
-            num_points=Ns,
-            total_cells=16,  # 4x4网格
+            num_points=len(refined_points),
+            total_cells=total_cells,
             avg_cell_size=np.mean(cell_sizes),
             median_cell_size=np.median(cell_sizes),
             cell_size_quantiles=np.percentile(cell_sizes, [25, 50, 75, 90]),
             num_filtered_dims=2,
-            avg_points_per_cell=Ns / Nc if Nc > 0 else 0,
+            avg_points_per_cell=len(refined_points) / Nc if Nc > 0 else 0,
             points_in_exact_range=len(refined_points)
         )
         
-        # 预测权重
+        # 使用训练好的模型预测权重
         weights = cost_model.predict_weights(test_stats)
         print(f"预测的权重:")
         print(f"wp (投影时间常数): {weights.wp:.6f}")
         print(f"wr (细化时间常数): {weights.wr:.6f}")
         print(f"ws (扫描时间常数): {weights.ws:.6f}")
         
-        # 估计查询时间
+        # 使用预测的权重估计查询时间
         estimated_time = cost_model.estimate_query_time(test_stats)
         print(f"估计的查询时间: {estimated_time:.6f} 秒")
         
         # 计算实际执行时间
-        projection_time = 0.01 * Nc
-        refinement_time = 0.005 * Nc
-        scan_time = 0.001 * Ns
-        
-        actual_time = projection_time + refinement_time + scan_time
+        actual_time = scan_end - projection_start
         print(f"实际执行时间: {actual_time:.6f} 秒")
         
         total_estimated_time += estimated_time
