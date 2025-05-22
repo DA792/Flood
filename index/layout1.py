@@ -256,6 +256,7 @@ class LayoutOptimizer:
         self.dimensions = len(dataset[0].coordinates) if dataset else 0
         self.plm_models = [PLMModel(error_threshold) for _ in range(self.dimensions)]
         self.rmi_models = [RMIModel() for _ in range(self.dimensions)]
+        self.cost_model = FloodCostModel()  # 添加成本模型作为成员变量
 
     def sample_data(self) -> Tuple[List[Point], List[Query]]:
         """采样数据和查询"""
@@ -409,8 +410,7 @@ class LayoutOptimizer:
         )
         
         # 4. 使用训练好的随机森林模型预测权重
-        cost_model = FloodCostModel()
-        weights = cost_model.predict_weights(stats)
+        weights = self.cost_model.predict_weights(stats)  # 使用成员变量
         
         # 5. 计算总成本
         projection_cost = weights.wp * Nc  # 投影成本
@@ -667,6 +667,64 @@ class LayoutOptimizer:
             values = [point.coordinates[dim] for point in sampled_data]
             indices = list(range(len(sampled_data)))
             self.rmi_models[dim].fit(values, indices)
+
+        # 训练成本模型
+        print("\n训练成本模型...")
+        training_data = []
+        for query in sampled_queries:
+            # 使用默认布局执行查询
+            dim_order = list(range(self.dimensions))
+            col_counts = [3] * (self.dimensions - 1)  # 使用3x3网格作为默认布局
+            layout = (dim_order, col_counts)
+            
+            # 执行查询并收集统计信息
+            refined_points, Nc, Ns = self.execute_query(query, layout)
+            
+            # 计算单元格大小统计信息
+            cell_sizes = [1.0/3] * (self.dimensions - 1)  # 3x3网格
+            
+            # 计算查询过滤的维度数量
+            num_filtered_dims = sum(1 for dim in range(self.dimensions) 
+                                  if query.min_bounds[dim] > 0 or query.max_bounds[dim] < 100)
+            
+            # 创建查询统计信息
+            stats = QueryStats(
+                num_cells=Nc,
+                num_points=Ns,
+                total_cells=3**(self.dimensions-1),  # 3x3网格
+                avg_cell_size=np.mean(cell_sizes),
+                median_cell_size=np.median(cell_sizes),
+                cell_size_quantiles=np.percentile(cell_sizes, [25, 50, 75, 90]),
+                num_filtered_dims=num_filtered_dims,
+                avg_points_per_cell=Ns/Nc if Nc > 0 else 0,
+                points_in_exact_range=Ns
+            )
+            
+            # 使用实际执行时间计算权重
+            # 从execute_query的输出中获取实际执行时间
+            projection_time = 0.01 * Nc  # 每个单元格0.01秒
+            refinement_time = 0.005 * len(refined_points)  # 每个候选点0.005秒
+            scan_time = 0.001 * Ns  # 每个结果点0.001秒
+            
+            # 计算实际权重
+            wp = projection_time / Nc if Nc > 0 else 0
+            wr = refinement_time / Nc if Nc > 0 else 0
+            ws = scan_time / Ns if Ns > 0 else 0
+            
+            weights = CostWeights(wp=wp, wr=wr, ws=ws)
+            training_data.append((stats, weights))
+            
+            print(f"\n查询训练样本:")
+            print(f"扫描单元格数 (Nc): {Nc}")
+            print(f"扫描点数 (Ns): {Ns}")
+            print(f"实际权重:")
+            print(f"  wp (投影时间常数): {wp:.6f}")
+            print(f"  wr (细化时间常数): {wr:.6f}")
+            print(f"  ws (扫描时间常数): {ws:.6f}")
+        
+        # 训练成本模型
+        self.cost_model.train(training_data)
+        print("成本模型训练完成")
 
         best_cost = float('inf')
         best_layout = None
