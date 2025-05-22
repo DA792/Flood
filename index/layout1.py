@@ -370,8 +370,8 @@ class LayoutOptimizer:
             max_cdf = max(0.0, min(1.0, self.rmi_models[dim].predict(query.max_bounds[dim])))
             
             # 计算查询范围内的列数
-            min_col = int(min_cdf * col_counts[i])
-            max_col = int(max_cdf * col_counts[i])
+            min_col = max(0, int(min_cdf * col_counts[i]))
+            max_col = min(col_counts[i] - 1, int(max_cdf * col_counts[i]))
             cells_in_dim = max(1, max_col - min_col + 1)  # 确保至少有一个单元格
             cells_to_scan.append((min_col, max_col))
         
@@ -410,7 +410,7 @@ class LayoutOptimizer:
         )
         
         # 4. 使用训练好的随机森林模型预测权重
-        weights = self.cost_model.predict_weights(stats)  # 使用成员变量
+        weights = self.cost_model.predict_weights(stats)
         
         # 5. 计算总成本
         projection_cost = weights.wp * Nc  # 投影成本
@@ -437,10 +437,10 @@ class LayoutOptimizer:
         
         return total_cost, cost_details
 
-    def execute_query(self, query: Query, layout: Tuple[List[int], List[int]]) -> Tuple[List[Point], int, int]:
+    def execute_query(self, query: Query, layout: Tuple[List[int], List[int]]) -> Tuple[List[Point], int, int, float, float, float]:
         """执行查询，包括投影、细化和扫描过程
         返回:
-            (结果点列表, 扫描单元格数, 扫描点数)
+            (结果点列表, 扫描单元格数, 扫描点数, 投影时间, 细化时间, 扫描时间)
         """
         dim_order, col_counts = layout
         sort_dim = dim_order[-1]  # 获取排序维度
@@ -450,21 +450,20 @@ class LayoutOptimizer:
         cells_to_scan = []
         for i, dim in enumerate(dim_order[:-1]):
             # 使用RMI模型预测查询范围的CDF值
-            min_cdf = self.rmi_models[dim].predict(query.min_bounds[dim])
-            max_cdf = self.rmi_models[dim].predict(query.max_bounds[dim])
+            min_cdf = max(0.0, min(1.0, self.rmi_models[dim].predict(query.min_bounds[dim])))
+            max_cdf = max(0.0, min(1.0, self.rmi_models[dim].predict(query.max_bounds[dim])))
             
             # 将CDF值转换为列索引
-            min_col = int(min_cdf * col_counts[i])
-            max_col = int(max_cdf * col_counts[i])
+            min_col = max(0, int(min_cdf * col_counts[i]))
+            max_col = min(col_counts[i] - 1, int(max_cdf * col_counts[i]))
             cells_to_scan.append((min_col, max_col))
 
         # 计算查询范围内的单元格数量 (Nc)
         Nc = 1
         for min_col, max_col in cells_to_scan:
-            Nc *= (max_col - min_col + 1)
+            Nc *= max(1, max_col - min_col + 1)  # 确保至少为1
         
-        # 模拟投影阶段的延迟
-        time.sleep(0.01 * Nc)  # 每个单元格0.01秒的延迟
+        # 执行投影操作
         projection_time = time.time() - projection_start
 
         # 2. 细化过程
@@ -503,8 +502,8 @@ class LayoutOptimizer:
                 sort_indices = list(range(len(refined_cell_points)))
                 
                 # 使用PLM模型预测
-                predicted_start = int(self.plm_models[sort_dim].predict(query.min_bounds[sort_dim], cell_key))
-                predicted_end = int(self.plm_models[sort_dim].predict(query.max_bounds[sort_dim], cell_key))
+                predicted_start = max(0, int(self.plm_models[sort_dim].predict(query.min_bounds[sort_dim], cell_key)))
+                predicted_end = min(len(sort_values), int(self.plm_models[sort_dim].predict(query.max_bounds[sort_dim], cell_key)))
                 
                 # 执行局部搜索来纠正预测
                 search_range = 10  # 局部搜索的范围
@@ -528,8 +527,6 @@ class LayoutOptimizer:
                 # 添加细化后的点
                 candidates.extend(refined_cell_points[actual_start:actual_end+1])
         
-        # 模拟细化阶段的延迟
-        time.sleep(0.005 * len(candidates))  # 每个候选点0.005秒的延迟
         refinement_time = time.time() - refinement_start
 
         # 3. 扫描阶段
@@ -540,14 +537,7 @@ class LayoutOptimizer:
                   for dim in range(self.dimensions)):
                 refined_points.append(point)
         
-        # 模拟扫描阶段的延迟
-        time.sleep(0.001 * len(refined_points))  # 每个结果点0.001秒的延迟
         scan_time = time.time() - scan_start
-
-        # 计算实际的权重
-        wp = projection_time / Nc if Nc > 0 else 0
-        wr = refinement_time / Nc if Nc > 0 else 0
-        ws = scan_time / len(refined_points) if len(refined_points) > 0 else 0
 
         # 输出查询统计信息
         Ns = len(refined_points)
@@ -558,12 +548,8 @@ class LayoutOptimizer:
         print(f"投影时间: {projection_time:.6f}秒")
         print(f"细化时间: {refinement_time:.6f}秒")
         print(f"扫描时间: {scan_time:.6f}秒")
-        print(f"实际权重:")
-        print(f"  wp (投影时间常数): {wp:.6f}")
-        print(f"  wr (细化时间常数): {wr:.6f}")
-        print(f"  ws (扫描时间常数): {ws:.6f}")
 
-        return refined_points, Nc, Ns
+        return refined_points, Nc, Ns, projection_time, refinement_time, scan_time
 
     def gradient_descent(self, data: List[Point], queries: List[Query],
                         dim_order: List[int], learning_rate: float = 0.1,
@@ -678,10 +664,13 @@ class LayoutOptimizer:
             layout = (dim_order, col_counts)
             
             # 执行查询并收集统计信息
-            refined_points, Nc, Ns = self.execute_query(query, layout)
+            refined_points, Nc, Ns, projection_time, refinement_time, scan_time = self.execute_query(query, layout)
             
             # 计算单元格大小统计信息
-            cell_sizes = [1.0/3] * (self.dimensions - 1)  # 3x3网格
+            cell_sizes = []
+            for i in range(self.dimensions-1):
+                cell_width = 1.0 / col_counts[i]
+                cell_sizes.append(cell_width)
             
             # 计算查询过滤的维度数量
             num_filtered_dims = sum(1 for dim in range(self.dimensions) 
@@ -701,12 +690,6 @@ class LayoutOptimizer:
             )
             
             # 使用实际执行时间计算权重
-            # 从execute_query的输出中获取实际执行时间
-            projection_time = 0.01 * Nc  # 每个单元格0.01秒
-            refinement_time = 0.005 * len(refined_points)  # 每个候选点0.005秒
-            scan_time = 0.001 * Ns  # 每个结果点0.001秒
-            
-            # 计算实际权重
             wp = projection_time / Nc if Nc > 0 else 0
             wr = refinement_time / Nc if Nc > 0 else 0
             ws = scan_time / Ns if Ns > 0 else 0
@@ -813,9 +796,12 @@ def main():
     total_scan_time = 0
     
     for i, query in enumerate(queries):
-        results, Nc, Ns = optimizer.execute_query(query, best_layout)
+        results, Nc, Ns, projection_time, refinement_time, scan_time = optimizer.execute_query(query, best_layout)
         total_Nc += Nc
         total_Ns += Ns
+        total_projection_time += projection_time
+        total_refinement_time += refinement_time
+        total_scan_time += scan_time
         print(f"\n查询 {i} 结果:")
         print(f"找到 {len(results)} 个结果点")
         if len(results) > 0:
@@ -831,6 +817,10 @@ def main():
         print(f"平均每单元格点数: {total_Ns/total_Nc:.2f}")
     else:
         print("平均每单元格点数: 0.00")
+
+    print(f"平均投影时间: {total_projection_time/len(queries):.6f}秒")
+    print(f"平均细化时间: {total_refinement_time/len(queries):.6f}秒")
+    print(f"平均扫描时间: {total_scan_time/len(queries):.6f}秒")
 
 
 if __name__ == "__main__":
