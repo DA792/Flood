@@ -100,14 +100,14 @@ def generate_training_data(num_samples: int,
         
         # 为每个维度随机生成列数，确保总单元格数在合理范围内
         col_counts = []
-        remaining_cells = random.randint(16, 64)  # 总单元格数在16到64之间
+        remaining_cells = random.randint(64, 256)  # 增加总单元格数范围以适应1兆数据
         for i in range(dimensions-1):
             if i == dimensions-2:  # 最后一个维度
                 col_counts.append(remaining_cells)
             else:
                 # 随机分配列数，但确保不会导致总单元格数过大
                 max_cols = int(remaining_cells ** (1/(dimensions-i-1)))
-                cols = random.randint(2, max(3, max_cols))
+                cols = random.randint(4, max(5, max_cols))  # 增加最小列数
                 col_counts.append(cols)
                 remaining_cells //= cols
         
@@ -138,39 +138,36 @@ def generate_training_data(num_samples: int,
             # 记录投影阶段开始时间
             projection_start = time.time()
             
-            # 模拟投影阶段的延迟
-            time.sleep(0.01 * Nc)  # 每个单元格0.01秒
+            # 模拟投影阶段的延迟（减少延迟以适应大数据集）
+            time.sleep(0.001 * Nc)  # 每个单元格0.001秒
             
-            # 2. 细化阶段
+            # 2. 细化阶段（优化：直接进行范围查询而不是逐点检查）
             candidates = []
+            candidate_count = 0
             for point in dataset:
-                in_candidate_cells = True
-                for i, (dim, (min_col, max_col)) in enumerate(zip(dim_order[:-1], cells_to_scan)):
-                    col_idx = int((point.coordinates[dim] / 100.0) * col_counts[i])
-                    if not (min_col <= col_idx <= max_col):
-                        in_candidate_cells = False
-                        break
-                if in_candidate_cells:
+                # 快速检查点是否在查询范围内
+                if (query.min_bounds[0] <= point.coordinates[0] <= query.max_bounds[0] and
+                    query.min_bounds[1] <= point.coordinates[1] <= query.max_bounds[1]):
                     candidates.append(point)
+                    candidate_count += 1
+                    # 限制候选点数量以提高训练性能
+                    if candidate_count > 10000:  # 训练时最多处理1万个候选点
+                        break
             
             # 记录细化阶段开始时间
             refinement_start = time.time()
             
-            # 模拟细化阶段的延迟
-            time.sleep(0.005 * len(candidates))  # 每个候选点0.005秒
+            # 模拟细化阶段的延迟（减少延迟）
+            time.sleep(0.0001 * len(candidates))  # 每个候选点0.0001秒
             
-            # 3. 扫描阶段
-            refined_points = []
-            for point in candidates:
-                if all(query.min_bounds[dim] <= point.coordinates[dim] <= query.max_bounds[dim] 
-                      for dim in range(dimensions)):
-                    refined_points.append(point)
+            # 3. 扫描阶段（已经在上面完成了精确匹配）
+            refined_points = candidates
             
             # 记录扫描阶段结束时间
             scan_end = time.time()
             
-            # 模拟扫描阶段的延迟
-            time.sleep(0.001 * len(refined_points))  # 每个结果点0.001秒
+            # 模拟扫描阶段的延迟（减少延迟）
+            time.sleep(0.00001 * len(refined_points))  # 每个结果点0.00001秒
             
             # 计算各阶段的实际执行时间
             projection_time = refinement_start - projection_start
@@ -220,17 +217,24 @@ def generate_training_data(num_samples: int,
 
 
 def main():
-    # 创建更大的示例数据集
+    # 创建1兆数据的示例数据集
     dataset = []
-    # 生成1000个随机点
-    for _ in range(1000):
+    print("正在生成1,000,000个随机数据点...")
+    # 生成1,000,000个随机点
+    for i in range(1000000):
         coordinates = [random.uniform(0, 100) for _ in range(2)]
         dataset.append(Point(coordinates))
+        # 每生成10万个点显示一次进度
+        if (i + 1) % 100000 == 0:
+            print(f"已生成 {i + 1:,} 个数据点")
+
+    print(f"数据集生成完成，共 {len(dataset):,} 个数据点")
 
     # 创建更多的示例查询
     queries = []
-    # 生成20个不同大小的查询
-    for _ in range(20):
+    print("正在生成100个测试查询...")
+    # 生成100个不同大小的查询
+    for _ in range(100):
         # 随机选择查询中心点
         center = [random.uniform(0, 100) for _ in range(2)]
         # 随机选择查询范围大小
@@ -240,6 +244,8 @@ def main():
         max_bounds = [min(100, c + range_size/2) for c in center]
         queries.append(Query(min_bounds, max_bounds))
 
+    print(f"查询集生成完成，共 {len(queries)} 个查询")
+
     # 创建成本模型
     cost_model = FloodCostModel()
     
@@ -248,9 +254,9 @@ def main():
     training_data = generate_training_data(
         num_samples=10,  # 只使用10个随机布局
         dimensions=2,    # 2维数据
-        num_queries=20,  # 每个布局20个查询
+        num_queries=50,  # 每个布局50个查询（从前50个查询中选择）
         dataset=dataset,
-        queries=queries
+        queries=queries[:50]  # 只使用前50个查询进行训练
     )
     
     # 训练模型
@@ -264,15 +270,18 @@ def main():
     total_estimated_time = 0
     total_actual_time = 0
     
-    print("\n执行测试查询:")
-    for i, query in enumerate(queries):
-        print(f"\n测试查询 {i+1}:")
+    # 使用后50个查询进行测试
+    test_queries = queries[50:]
+    print(f"\n执行测试查询（使用后{len(test_queries)}个查询进行测试）:")
+    
+    for i, query in enumerate(test_queries):
+        print(f"\n测试查询 {i+1}/{len(test_queries)}:")
         print(f"查询范围: ({query.min_bounds[0]:.1f}, {query.min_bounds[1]:.1f}) - ({query.max_bounds[0]:.1f}, {query.max_bounds[1]:.1f})")
         
-        # 使用最优布局进行测试（这里使用8x8网格作为示例）
+        # 使用最优布局进行测试（这里使用16x16网格以适应更大的数据集）
         dim_order = [0, 1]  # 最优维度顺序
-        col_counts = [8, 8]  # 最优列数配置
-        total_cells = 64
+        col_counts = [16, 16]  # 最优列数配置（增加到16x16以适应1兆数据）
+        total_cells = 256
         
         # 1. 投影阶段
         cells_to_scan = []
@@ -291,42 +300,39 @@ def main():
         # 记录投影阶段开始时间
         projection_start = time.time()
         
-        # 模拟投影阶段的延迟
-        time.sleep(0.01 * Nc)  # 每个单元格0.01秒
+        # 模拟投影阶段的延迟（减少延迟以适应更大数据集）
+        time.sleep(0.001 * Nc)  # 每个单元格0.001秒
         
-        # 2. 计算扫描的点数
+        # 2. 计算扫描的点数（优化：只扫描相关区域的点）
         candidates = []
+        candidate_count = 0
         for point in dataset:
-            in_candidate_cells = True
-            for i, (dim, (min_col, max_col)) in enumerate(zip(dim_order[:-1], cells_to_scan)):
-                col_idx = int((point.coordinates[dim] / 100.0) * col_counts[i])
-                if not (min_col <= col_idx <= max_col):
-                    in_candidate_cells = False
-                    break
-            if in_candidate_cells:
+            # 快速检查点是否在查询范围内
+            if (query.min_bounds[0] <= point.coordinates[0] <= query.max_bounds[0] and
+                query.min_bounds[1] <= point.coordinates[1] <= query.max_bounds[1]):
                 candidates.append(point)
+                candidate_count += 1
+                # 限制候选点数量以提高性能
+                if candidate_count > 50000:  # 最多处理5万个候选点
+                    break
         
         # 记录细化阶段开始时间
         refinement_start = time.time()
         
-        # 模拟细化阶段的延迟
-        time.sleep(0.005 * len(candidates))  # 每个候选点0.005秒
+        # 模拟细化阶段的延迟（减少延迟）
+        time.sleep(0.0001 * len(candidates))  # 每个候选点0.0001秒
         
-        # 3. 扫描阶段
-        refined_points = []
-        for point in candidates:
-            if all(query.min_bounds[dim] <= point.coordinates[dim] <= query.max_bounds[dim] 
-                  for dim in range(2)):
-                refined_points.append(point)
+        # 3. 扫描阶段（已经在上面完成了精确匹配）
+        refined_points = candidates
         
         # 记录扫描阶段结束时间
         scan_end = time.time()
         
-        # 模拟扫描阶段的延迟
-        time.sleep(0.001 * len(refined_points))  # 每个结果点0.001秒
+        # 模拟扫描阶段的延迟（减少延迟）
+        time.sleep(0.00001 * len(refined_points))  # 每个结果点0.00001秒
         
         # 3. 计算单元格大小统计信息
-        cell_sizes = [1.0/8, 1.0/8]  # 8x8网格
+        cell_sizes = [1.0/16, 1.0/16]  # 16x16网格
         
         # 创建查询统计信息
         test_stats = QueryStats(
@@ -355,17 +361,18 @@ def main():
         # 计算实际执行时间
         actual_time = scan_end - projection_start
         print(f"实际执行时间: {actual_time:.6f} 秒")
+        print(f"扫描单元格数 (Nc): {Nc}")
+        print(f"匹配点数: {len(refined_points):,}")
         
         total_estimated_time += estimated_time
         total_actual_time += actual_time
     
     # 输出平均性能
     print("\n平均性能:")
-    print(f"平均估计时间: {total_estimated_time/len(queries):.6f} 秒")
-    print(f"平均实际时间: {total_actual_time/len(queries):.6f} 秒")
+    print(f"平均估计时间: {total_estimated_time/len(test_queries):.6f} 秒")
+    print(f"平均实际时间: {total_actual_time/len(test_queries):.6f} 秒")
     print(f"平均误差: {abs(total_estimated_time - total_actual_time)/total_actual_time*100:.2f}%")
 
 
 if __name__ == "__main__":
     main()
-    //1
