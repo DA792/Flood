@@ -3,7 +3,11 @@ from sklearn.ensemble import RandomForestRegressor
 from typing import List, Tuple, Dict
 import random
 import time
-from data_structures import Point, Query, QueryStats, CostWeights
+
+try:
+    from .data_structures import Point, Query, QueryStats, CostWeights
+except ImportError:
+    from data_structures import Point, Query, QueryStats, CostWeights
 
 
 class FloodCostModel:
@@ -48,28 +52,86 @@ class FloodCostModel:
         return np.array(features)
 
     def train(self, training_data: List[Tuple[QueryStats, CostWeights]]):
-        """训练成本模型"""
+        """训练成本模型 - 为每个权重训练独立的随机森林模型"""
+        print(f"\n开始训练3个独立的随机森林模型...")
+        print(f"训练数据样本数: {len(training_data)}")
+        
         X = np.array([self.extract_features(stats) for stats, _ in training_data])
         y_wp = np.array([weights.wp for _, weights in training_data])
         y_wr = np.array([weights.wr for _, weights in training_data])
         y_ws = np.array([weights.ws for _, weights in training_data])
 
+        print(f"\n特征矩阵形状: {X.shape}")
+        print(f"wp目标值范围: [{np.min(y_wp):.6f}, {np.max(y_wp):.6f}]")
+        print(f"wr目标值范围: [{np.min(y_wr):.6f}, {np.max(y_wr):.6f}]")
+        print(f"ws目标值范围: [{np.min(y_ws):.6f}, {np.max(y_ws):.6f}]")
+
+        # 训练wp模型（投影权重预测）
+        print(f"\n训练wp随机森林模型（投影权重预测）...")
         self.wp_model.fit(X, y_wp)
+        wp_score = self.wp_model.score(X, y_wp)
+        print(f"wp模型训练完成，R²得分: {wp_score:.4f}")
+        print(f"wp模型特征重要性: {self.wp_model.feature_importances_}")
+
+        # 训练wr模型（细化权重预测）
+        print(f"\n训练wr随机森林模型（细化权重预测）...")
         self.wr_model.fit(X, y_wr)
+        wr_score = self.wr_model.score(X, y_wr)
+        print(f"wr模型训练完成，R²得分: {wr_score:.4f}")
+        print(f"wr模型特征重要性: {self.wr_model.feature_importances_}")
+
+        # 训练ws模型（扫描权重预测）
+        print(f"\n训练ws随机森林模型（扫描权重预测）...")
         self.ws_model.fit(X, y_ws)
+        ws_score = self.ws_model.score(X, y_ws)
+        print(f"ws模型训练完成，R²得分: {ws_score:.4f}")
+        print(f"ws模型特征重要性: {self.ws_model.feature_importances_}")
+
         self.is_trained = True
+        
+        print(f"\n所有随机森林模型训练完成!")
+        print(f"模型性能总结:")
+        print(f"  wp模型 (投影): R² = {wp_score:.4f}")
+        print(f"  wr模型 (细化): R² = {wr_score:.4f}")
+        print(f"  ws模型 (扫描): R² = {ws_score:.4f}")
 
     def predict_weights(self, stats: QueryStats) -> CostWeights:
-        """预测成本权重"""
+        """使用3个独立的随机森林模型预测成本权重"""
         if not self.is_trained:
-            raise RuntimeError("模型尚未训练")
+            raise RuntimeError("随机森林模型尚未训练")
 
         features = self.extract_features(stats).reshape(1, -1)
-        wp = self.wp_model.predict(features)[0]
-        wr = self.wr_model.predict(features)[0]
-        ws = self.ws_model.predict(features)[0]
+        
+        # 使用3个独立的随机森林模型分别预测每个权重
+        wp = self.wp_model.predict(features)[0]  # 投影权重
+        wr = self.wr_model.predict(features)[0]  # 细化权重
+        ws = self.ws_model.predict(features)[0]  # 扫描权重
 
         return CostWeights(wp=wp, wr=wr, ws=ws)
+
+    def get_model_info(self) -> Dict[str, any]:
+        """获取模型信息"""
+        if not self.is_trained:
+            return {"status": "未训练"}
+        
+        return {
+            "status": "已训练",
+            "wp_model": {
+                "n_estimators": self.wp_model.n_estimators,
+                "max_depth": self.wp_model.max_depth,
+                "feature_importances": self.wp_model.feature_importances_.tolist()
+            },
+            "wr_model": {
+                "n_estimators": self.wr_model.n_estimators,
+                "max_depth": self.wr_model.max_depth,
+                "feature_importances": self.wr_model.feature_importances_.tolist()
+            },
+            "ws_model": {
+                "n_estimators": self.ws_model.n_estimators,
+                "max_depth": self.ws_model.max_depth,
+                "feature_importances": self.ws_model.feature_importances_.tolist()
+            }
+        }
 
     def estimate_query_time(self, stats: QueryStats) -> float:
         """估计查询时间"""
